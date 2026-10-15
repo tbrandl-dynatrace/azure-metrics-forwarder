@@ -1,0 +1,6 @@
+local.settings.json
+__pycache__/
+.venv/
+.python_packages/
+*.pyc
+.azure/
