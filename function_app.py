@@ -7,6 +7,10 @@ HEADERS = {"Authorization": f"Api-Token {os.environ['DT_TOKEN']}",
            "Content-Type": "text/plain; charset=utf-8"}
 KEY_SUFFIX = "-realtime"          # appended to every metric key to avoid clashing with the native metrics
 
+# The DCR, Event Hub and monitored resources share one region, so the location is constant per deployment.
+# Set AZURE_LOCATION explicitly (e.g. "westeurope"); falls back to REGION_NAME (e.g. "West Europe") set by Azure Functions.
+LOCATION = re.sub(r"[^a-z0-9]", "", (os.environ.get("AZURE_LOCATION") or os.environ.get("REGION_NAME", "")).lower())
+
 RID = re.compile(r"^/subscriptions/(?P<sub>[^/]+)/resourcegroups/(?P<rg>[^/]+)/providers/(?P<ns>[^/]+)/(?P<rest>.+)$", re.I)
 
 
@@ -59,6 +63,8 @@ def to_line(r: dict):
         "azure.resource.name": p["name"],
         "azure.resource.type": p["arm_type"],
     }
+    if LOCATION:
+        dims["azure.location"] = LOCATION
     for k, v in (r.get("dimension") or {}).items():             # metric dimensions from the export
         if v not in (None, ""):
             dims[dim_key(k)] = v

@@ -9,7 +9,7 @@ Azure resources → DCR (PlatformTelemetry) → Event Hub → Azure Function →
 - The DCR exports platform metrics (with dimensions) to an Event Hub. Microsoft quotes ~3 min end-to-end latency (diagnostic settings: 6–10 min).
 - The Function ([function_app.py](function_app.py)) is triggered by the Event Hub, converts each record to Dynatrace line protocol (`gauge,min,max,sum,count`) and posts it to `/api/v2/metrics/ingest`.
 - Metric keys follow the Dynatrace Azure convention `cloud.azure.<provider_namespace>.<resource_type>.<MetricName>` with a `-realtime` suffix (configurable via `KEY_SUFFIX`) so they don't clash with the metrics from the native Azure integration.
-- Attributes set: `cloud.provider`, `azure.subscription`, `azure.resource.group`, `azure.resource.id`, `azure.resource.name`, `azure.resource.type`, plus the metric's own dimensions.
+- Attributes set: `cloud.provider`, `azure.subscription`, `azure.resource.group`, `azure.resource.id`, `azure.resource.name`, `azure.resource.type`, `azure.location`, plus the metric's own dimensions.
 
 > Status: not yet tested end to end. Validate attribute names against your existing `cloud.azure.*` metrics before rolling out (see [Validate](#6-validate)).
 
@@ -83,6 +83,7 @@ func azure functionapp publish <function-app-name>
 | `DT_ENVIRONMENT` | Dynatrace environment URL, e.g. `https://abc12345.live.dynatrace.com` |
 | `DT_TOKEN` | API token with `metrics.ingest` (store in Key Vault and reference it) |
 | `EH_NAME` | Event Hub name |
+| `AZURE_LOCATION` | Region of the Event Hub / DCR / monitored resources, e.g. `westeurope`. Optional if the Function runs in that same region (falls back to the `REGION_NAME` variable Azure sets, normalized to `westeurope`), but set it explicitly to be safe. |
 | `EH_CONN` | Event Hub connection string setting name, or use identity-based: `EH_CONN__fullyQualifiedNamespace=<namespace>.servicebus.windows.net` |
 
 For identity-based access, grant the Function's managed identity **Azure Event Hubs Data Receiver** on the Event Hub. See [Event Hubs trigger – identity-based connections](https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-event-hubs-trigger#identity-based-connections).
@@ -104,7 +105,6 @@ For identity-based access, grant the Function's managed identity **Azure Event H
 
 ## Known limitations
 
-- `azure.location` is not part of the export, so it is not set. Adding it needs an ARM/Resource Graph lookup.
-- `dt.smartscape_source.id` can't be set by the Function; entity linking depends on Dynatrace mapping the Azure attributes on ingest.
+- `azure.location` is not part of the export. It is taken from the `AZURE_LOCATION` app setting (or `REGION_NAME`), which is only correct because the Event Hub, DCR and monitored resources must all be in the same region. Deploy one Function (or one setting) per region; don't consume hubs from several regions in one Function.
 - Platform metrics at scale with many dimensions can create high data-point volumes. Filter metrics in the DCR.
 - Consider whether the native Dynatrace Azure integration already covers your needs; this pipeline is for extra control over dimensions, filtering or multi-subscription pipelines.
