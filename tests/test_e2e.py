@@ -162,6 +162,16 @@ def test_dynatrace_errors_propagate_so_event_hubs_retries(dynatrace, load_functi
         run([FakeEvent(DCR_KEYVAULT)])
 
 
+def test_handler_annotation_is_accepted_by_the_python_worker(load_function):
+    """The Functions Python worker rejects builtin generics (list[...]) for a cardinality=many Event Hub trigger
+    ("FunctionLoadError: binding events has invalid non-type annotation"); it needs typing.List[...]."""
+    import types, typing
+    fn = load_function("http://127.0.0.1:1")
+    annotation = typing.get_type_hints(fn)["events"]
+    assert not isinstance(annotation, types.GenericAlias), "use typing.List[...], not list[...]"
+    assert typing.get_origin(annotation) is list and typing.get_args(annotation)[0].__name__ == "EventHubEvent"
+
+
 # --- live test against a real Dynatrace tenant (opt-in) --------------------------------------------------------
 
 LIVE_ENV, LIVE_TOKEN = os.environ.get("DT_ENVIRONMENT"), os.environ.get("DT_TOKEN")

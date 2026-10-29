@@ -1,4 +1,5 @@
 import os, re, json, datetime as dt, requests, azure.functions as func
+from typing import List
 
 app = func.FunctionApp()
 
@@ -101,7 +102,8 @@ def to_line(raw: dict):
 
 @app.event_hub_message_trigger(arg_name="events", event_hub_name="%EH_NAME%",
                                connection="EH_CONN", cardinality="many")
-def run(events: list[func.EventHubEvent]):
+# typing.List, not builtin list[...]: the Python worker rejects the latter (FunctionLoadError)
+def run(events: List[func.EventHubEvent]):
     lines = []
     for e in events:
         for r in iter_records(json.loads(e.get_body())):

@@ -164,7 +164,7 @@ Exported environment variables take precedence over `.env.local`. The same file 
 
 ### Real end-to-end test in Azure
 
-[scripts/e2e-azure.sh](scripts/e2e-azure.sh) provisions a throw-away resource group (Event Hub, this Function, and two Key Vaults — one exported through a DCR, one through a diagnostic setting), generates Key Vault traffic and polls Dynatrace (DQL API) until metrics from both vaults arrive, then tears everything down. Requires `az` (logged in), Azure Functions Core Tools and `python`.
+[scripts/e2e-azure.sh](scripts/e2e-azure.sh) provisions a throw-away resource group (Event Hub, this Function, and two Key Vaults — one exported through a DCR, one through a diagnostic setting), generates Key Vault traffic and polls Dynatrace (DQL API) until metrics from both vaults arrive, then tears everything down. Requires `az` (logged in), Azure Functions Core Tools and `python`. Contributor rights are enough to test the diagnostic-settings path; the DCR path additionally needs permission to create a role assignment (the DCR's identity must be granted *Azure Event Hubs Data Sender*). Without it the script says so and tests diagnostic settings only. The Function reads the Event Hub with a connection string by default; set `EH_AUTH=identity` to use its managed identity instead.
 
 ```bash
 # DT_ENVIRONMENT / DT_TOKEN come from .env.local (see above) or the environment

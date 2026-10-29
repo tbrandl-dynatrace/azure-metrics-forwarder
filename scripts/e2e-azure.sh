@@ -18,7 +18,8 @@
 #   ./scripts/e2e-azure.sh down      # delete everything
 #   ./scripts/e2e-azure.sh all       # up + verify + down
 #
-# Needs: az CLI (logged in; Owner/User Access Administrator on the subscription for role assignments),
+# Needs: az CLI (logged in; Contributor is enough for everything except the DCR export, which needs a role
+#        assignment (Owner / User Access Administrator) - without it the script tests diagnostic settings only),
 #        Azure Functions Core Tools (func), curl, python. Works in Git Bash / WSL / Linux / macOS.
 # Not part of the Function itself; costs a few cents (Event Hubs Standard, storage, Key Vault operations).
 # NOTE: this script has not been run by its author; expect to adjust az flags for your CLI version.
@@ -41,10 +42,24 @@ fi
 LOCATION="${LOCATION:-westeurope}"          # everything must be in one region (DCR / diagnostic setting requirement)
 MAX_WAIT_MIN="${MAX_WAIT_MIN:-90}"
 DCR_API_VERSION="${DCR_API_VERSION:-2023-03-11}"
+# How the Function reads the Event Hub: "connection-string" (default, needs no role assignments) or "identity".
+EH_AUTH="${EH_AUTH:-connection-string}"
 PY="$(command -v python3 || command -v python)"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 need() { command -v "$1" >/dev/null || { echo "missing required tool: $1" >&2; exit 1; }; }
+
+save_state() {
+  cat > "$STATE" <<EOF
+PREFIX=$PREFIX
+RG=$RG
+NS_ID=${NS_ID:-}
+KV_DCR=$KV_DCR
+KV_DIAG=$KV_DIAG
+FUNC=$FUNC
+DCR_ENABLED=$DCR_ENABLED
+EOF
+}
 
 load_state() { [ -f "$STATE" ] && . "$STATE" || { echo "no state file; run 'up' first" >&2; exit 1; }; }
 
@@ -63,8 +78,10 @@ up() {
     az provider register --namespace "$p" --wait -o none
   done
 
+  DCR_ENABLED=1
   log "Resource group + Event Hub ($RG, $LOCATION)"
   az group create -n "$RG" -l "$LOCATION" -o none
+  save_state                                     # so that 'down' works even if a later step fails
   az eventhubs namespace create -g "$RG" -n "$NS" -l "$LOCATION" --sku Standard -o none
   az eventhubs eventhub create -g "$RG" --namespace-name "$NS" -n "$HUB" --partition-count 2 -o none
   NS_ID="$(az eventhubs namespace show -g "$RG" -n "$NS" --query id -o tsv)"
@@ -81,13 +98,20 @@ up() {
   az storage account create -g "$RG" -n "$ST" -l "$LOCATION" --sku Standard_LRS -o none
   az functionapp create -g "$RG" -n "$FUNC" --storage-account "$ST" \
     --flexconsumption-location "$LOCATION" --runtime python --runtime-version 3.11 -o none
-  FUNC_PRINCIPAL="$(az functionapp identity assign -g "$RG" -n "$FUNC" --query principalId -o tsv)"
-  az role assignment create --assignee-object-id "$FUNC_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-    --role "Azure Event Hubs Data Receiver" --scope "$NS_ID" -o none
   # test only: for real deployments keep the token in Key Vault and use a Key Vault reference
   az functionapp config appsettings set -g "$RG" -n "$FUNC" -o none --settings \
-    "DT_ENVIRONMENT=$DT_ENVIRONMENT" "DT_TOKEN=$DT_TOKEN" "EH_NAME=$HUB" \
-    "EH_CONN__fullyQualifiedNamespace=$NS.servicebus.windows.net" "AZURE_LOCATION=$LOCATION"
+    "DT_ENVIRONMENT=$DT_ENVIRONMENT" "DT_TOKEN=$DT_TOKEN" "EH_NAME=$HUB" "AZURE_LOCATION=$LOCATION"
+  if [ "$EH_AUTH" = "identity" ]; then          # needs permission to create role assignments
+    FUNC_PRINCIPAL="$(az functionapp identity assign -g "$RG" -n "$FUNC" --query principalId -o tsv)"
+    az role assignment create --assignee-object-id "$FUNC_PRINCIPAL" --assignee-principal-type ServicePrincipal \
+      --role "Azure Event Hubs Data Receiver" --scope "$NS_ID" -o none
+    az functionapp config appsettings set -g "$RG" -n "$FUNC" -o none --settings \
+      "EH_CONN__fullyQualifiedNamespace=$NS.servicebus.windows.net"
+  else                                          # no RBAC needed: shared access key of the namespace
+    EH_CS="$(az eventhubs namespace authorization-rule keys list -g "$RG" --namespace-name "$NS" \
+      --name RootManageSharedAccessKey --query primaryConnectionString -o tsv)"
+    az functionapp config appsettings set -g "$RG" -n "$FUNC" -o none --settings "EH_CONN=$EH_CS"
+  fi
 
   log "Deploying the Function code"
   (cd "$ROOT" && func azure functionapp publish "$FUNC" --python)
@@ -103,7 +127,7 @@ up() {
     "dataSources": { "platformTelemetry": [ {
       "name": "keyvaultMetrics",
       "streams": [ "Microsoft.KeyVault/vaults:Metrics-Group-All" ] } ] },
-    "destinations": { "eventHubsDirect": [ { "name": "eh", "eventHubResourceId": "$HUB_ID" } ] },
+    "destinations": { "eventHubs": [ { "name": "eh", "eventHubResourceId": "$HUB_ID" } ] },
     "dataFlows": [ {
       "streams": [ "Microsoft.KeyVault/vaults:Metrics-Group-All" ],
       "destinations": [ "eh" ] } ]
@@ -112,23 +136,34 @@ up() {
 EOF
 )"
   DCR_ID="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Insights/dataCollectionRules/$DCR"
-  az role assignment create --assignee-object-id "$DCR_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-    --role "Azure Event Hubs Data Sender" --scope "$NS_ID" -o none
-  az monitor data-collection rule association create --name "$PREFIX-assoc" --rule-id "$DCR_ID" --resource "$KV_DCR_ID" -o none
+  # A DCR can only write to an Event Hub through its managed identity, so this role assignment is unavoidable.
+  if az role assignment create --assignee-object-id "$DCR_PRINCIPAL" --assignee-principal-type ServicePrincipal \
+       --role "Azure Event Hubs Data Sender" --scope "$NS_ID" -o none; then
+    az monitor data-collection rule association create --name "$PREFIX-assoc" --rule-id "$DCR_ID" --resource "$KV_DCR_ID" -o none
+  else
+    DCR_ENABLED=0
+    save_state
+    cat <<EOF
+
+WARNING: you are not allowed to create role assignments, so the DCR export can't deliver data.
+Continuing with the diagnostic-settings export only. To test the DCR path, ask someone with
+Owner / User Access Administrator to run:
+
+  az role assignment create --assignee-object-id $DCR_PRINCIPAL --assignee-principal-type ServicePrincipal \\
+    --role "Azure Event Hubs Data Sender" --scope $NS_ID
+  az monitor data-collection rule association create --name $PREFIX-assoc --rule-id $DCR_ID --resource $KV_DCR_ID
+
+(then re-run './scripts/e2e-azure.sh verify' after setting DCR_ENABLED=1 in $STATE)
+
+EOF
+  fi
 
   log "Export method B: diagnostic setting (Key Vault '$KV_DIAG')"
   az monitor diagnostic-settings create --name "$PREFIX-diag" --resource "$KV_DIAG_ID" \
     --metrics '[{"category":"AllMetrics","enabled":true}]' \
     --event-hub-rule "$NS_ID/authorizationrules/RootManageSharedAccessKey" --event-hub "$HUB" -o none
 
-  cat > "$STATE" <<EOF
-PREFIX=$PREFIX
-RG=$RG
-NS_ID=$NS_ID
-KV_DCR=$KV_DCR
-KV_DIAG=$KV_DIAG
-FUNC=$FUNC
-EOF
+  save_state
   log "Waiting 60 s for role assignments to propagate"
   sleep 60
   echo "Provisioned. State saved in $STATE. Next: ./scripts/e2e-azure.sh verify"
@@ -156,13 +191,14 @@ verify() {
 
   log "Generating Key Vault traffic and polling Dynatrace (max ${MAX_WAIT_MIN} min)"
   local deadline=$(( $(date +%s) + MAX_WAIT_MIN * 60 )) dcr_ok=0 diag_ok=0
+  [ "${DCR_ENABLED:-1}" = 0 ] && { dcr_ok=1; echo "DCR path skipped (no role-assignment permission); testing diagnostic settings only"; }
   while [ "$(date +%s)" -lt "$deadline" ]; do
     generate_traffic
     local found; found="$(query_dynatrace || true)"
     echo "$found" | grep -qi "/vaults/$KV_DCR\$"  && dcr_ok=1
     echo "$found" | grep -qi "/vaults/$KV_DIAG\$" && diag_ok=1
     echo "$(date +%H:%M:%S)  DCR export: $([ $dcr_ok = 1 ] && echo RECEIVED || echo waiting)   diagnostic setting export: $([ $diag_ok = 1 ] && echo RECEIVED || echo waiting)"
-    [ $dcr_ok = 1 ] && [ $diag_ok = 1 ] && { log "SUCCESS: both export methods delivered metrics to Dynatrace"; return 0; }
+    [ $dcr_ok = 1 ] && [ $diag_ok = 1 ] && { log "SUCCESS: all enabled export methods delivered metrics to Dynatrace"; return 0; }
     sleep 60
   done
 
