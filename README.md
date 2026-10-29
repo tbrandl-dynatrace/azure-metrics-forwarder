@@ -148,11 +148,32 @@ pip install -r requirements-dev.txt
 pytest tests
 ```
 
-An optional live test ingests a probe metric into a real tenant and waits until it's queryable. It needs a token with `metrics.ingest` and `metrics.read`:
+An optional live test ingests a probe metric into a real tenant and waits until it's queryable (it is skipped when no token is configured). Configure the tenant once in the git-ignored `.env.local` (template: [.env.example](.env.example)); the token needs `metrics.ingest` (ingest) and `storage:metrics:read` (verification queries via the **DQL query API**, `/platform/storage/query/v1/query:execute`). The query URL is derived from `DT_ENVIRONMENT` (e.g. `…sprint.dynatracelabs.com` → `…sprint.apps.dynatracelabs.com`) unless `DT_QUERY_ENVIRONMENT` is set:
+
+```
+DT_ENVIRONMENT=https://abc12345.live.dynatrace.com
+DT_TOKEN=dt0....               # metrics.ingest + storage:metrics:read
+# DT_QUERY_ENVIRONMENT=https://abc12345.apps.dynatrace.com   # optional override
+```
 
 ```bash
-DT_E2E_ENVIRONMENT=https://abc12345.live.dynatrace.com DT_E2E_TOKEN=dt0c01.... pytest tests -k live
+pytest tests -k live
 ```
+
+Exported environment variables take precedence over `.env.local`. The same file is read by `scripts/e2e-azure.sh`.
+
+### Real end-to-end test in Azure
+
+[scripts/e2e-azure.sh](scripts/e2e-azure.sh) provisions a throw-away resource group (Event Hub, this Function, and two Key Vaults — one exported through a DCR, one through a diagnostic setting), generates Key Vault traffic and polls Dynatrace (DQL API) until metrics from both vaults arrive, then tears everything down. Requires `az` (logged in), Azure Functions Core Tools and `python`.
+
+```bash
+# DT_ENVIRONMENT / DT_TOKEN come from .env.local (see above) or the environment
+./scripts/e2e-azure.sh up           # provision + deploy
+./scripts/e2e-azure.sh verify       # typically 10–40 min; new diagnostic settings can take up to 90 min
+./scripts/e2e-azure.sh down         # or: ./scripts/e2e-azure.sh all
+```
+
+The script hasn't been run yet; expect to adjust `az` flags for your CLI version.
 
 These tests don't cover the Azure side (DCR / diagnostic setting → Event Hub delivery); verify that with the steps in [Validate](#validate).
 

@@ -3,7 +3,24 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+
+def _load_env_local():
+    """Read DT_ENVIRONMENT / DT_TOKEN from the git-ignored .env.local (already-set variables win)."""
+    path = os.path.join(ROOT, ".env.local")
+    if not os.path.isfile(path):
+        return
+    for line in open(path, encoding="utf-8-sig"):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            if v.strip():
+                os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
+
+
+_load_env_local()
 
 
 class FakeEvent:

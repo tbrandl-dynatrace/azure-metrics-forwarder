@@ -4,15 +4,19 @@ The Function is invoked exactly as the Azure Functions host would (a list of eve
 calls are received by a local server that mimics POST /api/v2/metrics/ingest. Payloads are the examples
 from the Microsoft docs for both export methods.
 
-Set DT_E2E_ENVIRONMENT, DT_E2E_TOKEN (scopes: metrics.ingest, metrics.read) to also run the live test
-against a real Dynatrace tenant.
+Put DT_ENVIRONMENT + DT_TOKEN (scopes: metrics.ingest, storage:metrics:read) in the git-ignored .env.local (see .env.example), or export
+them, to also run the live test against a real Dynatrace tenant.
 """
 import os, re, time, datetime as dt
 
 import pytest
 import requests
 
-from conftest import FakeEvent
+from conftest import FakeEvent, ROOT
+
+import sys
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import dql
 
 # --- sample payloads (from the Microsoft Learn docs) ---------------------------------------------------------
 
@@ -160,10 +164,10 @@ def test_dynatrace_errors_propagate_so_event_hubs_retries(dynatrace, load_functi
 
 # --- live test against a real Dynatrace tenant (opt-in) --------------------------------------------------------
 
-LIVE_ENV, LIVE_TOKEN = os.environ.get("DT_E2E_ENVIRONMENT"), os.environ.get("DT_E2E_TOKEN")
+LIVE_ENV, LIVE_TOKEN = os.environ.get("DT_ENVIRONMENT"), os.environ.get("DT_TOKEN")
 
 
-@pytest.mark.skipif(not (LIVE_ENV and LIVE_TOKEN), reason="set DT_E2E_ENVIRONMENT and DT_E2E_TOKEN to run")
+@pytest.mark.skipif(not (LIVE_ENV and LIVE_TOKEN), reason="set DT_ENVIRONMENT and DT_TOKEN (e.g. in .env.local) to run")
 def test_live_metrics_arrive_in_dynatrace(load_function):
     run = load_function(LIVE_ENV, LIVE_TOKEN)
     name = f"e2e-{int(time.time())}"
@@ -173,16 +177,14 @@ def test_live_metrics_arrive_in_dynatrace(load_function):
               "time": now.strftime("%Y-%m-%dT%H:%M:%S.0000000Z"), "metricName": "E2EProbe", "timeGrain": "PT1M"}
     run([FakeEvent(wrap(record))])                       # raises if the ingest API rejects the request
 
-    selector = f'cloud.azure.microsoft_e2etest.forwarder.E2EProbe-realtime:filter(eq("azure.resource.name","{name}")):sum'
-    deadline = time.time() + 120
+    dql_text = ("timeseries s = sum(`cloud.azure.microsoft_e2etest.forwarder.E2EProbe-realtime`), "
+                f'filter: azure.resource.name == "{name}", from: now()-30m '
+                "| fieldsAdd total = arraySum(s) | fields total")
+    deadline = time.time() + 180
     while time.time() < deadline:                        # ingested metrics can take a short while to become queryable
-        r = requests.get(LIVE_ENV.rstrip("/") + "/api/v2/metrics/query", timeout=30,
-                         headers={"Authorization": f"Api-Token {LIVE_TOKEN}"},
-                         params={"metricSelector": selector, "from": "now-30m", "resolution": "1m"})
-        r.raise_for_status()
-        values = [v for res in r.json().get("result", []) for d in res.get("data", []) for v in d["values"] if v is not None]
-        if values:
-            assert values == [6.0]
+        records = dql.query(dql_text)
+        if records:
+            assert records[0]["total"] == 6.0, records
             return
         time.sleep(10)
-    pytest.fail("metric did not become queryable within 2 minutes")
+    pytest.fail("metric did not become queryable via DQL within 3 minutes")
