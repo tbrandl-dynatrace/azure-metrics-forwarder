@@ -139,6 +139,23 @@ For identity-based access, grant the Function's managed identity **Azure Event H
 - Compare against the existing `cloud.azure.*` metric's dimensions and adjust the `dims` dict in `to_line()` if your tenant uses different attribute names (e.g. `azure.resourceId`).
 - DCR troubleshooting: [DCR monitoring](https://learn.microsoft.com/en-us/azure/azure-monitor/data-collection/data-collection-monitor).
 
+## Testing
+
+[tests/test_e2e.py](tests/test_e2e.py) runs the Function handler the way the Functions host does (a batch of Event Hub events) and checks the real HTTP requests it sends to a local mock of the Dynatrace ingest API. It uses the example payloads from the Microsoft docs for both export methods and covers attributes and metric keys, DCR/diagnostic-settings parity, ignoring log records, 1,000-line batching, escaping, and error propagation (so Event Hubs retries).
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests
+```
+
+An optional live test ingests a probe metric into a real tenant and waits until it's queryable. It needs a token with `metrics.ingest` and `metrics.read`:
+
+```bash
+DT_E2E_ENVIRONMENT=https://abc12345.live.dynatrace.com DT_E2E_TOKEN=dt0c01.... pytest tests -k live
+```
+
+These tests don't cover the Azure side (DCR / diagnostic setting → Event Hub delivery); verify that with the steps in [Validate](#validate).
+
 ## Dynatrace API reference
 
 [Metrics v2 – ingest](https://docs.dynatrace.com/docs/discover-dynatrace/references/dynatrace-api/environment-api/metric-v2/post-ingest-metrics) (limits: 1,000 lines or 1 MB per request; points too far in the past are rejected).

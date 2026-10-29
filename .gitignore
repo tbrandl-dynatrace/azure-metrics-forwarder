@@ -4,3 +4,4 @@ __pycache__/
 .python_packages/
 *.pyc
 .azure/
+.pytest_cache/
