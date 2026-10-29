@@ -15,6 +15,7 @@
 #   ./scripts/e2e-azure.sh up        # provision + deploy (~10 min)
 #   ./scripts/e2e-azure.sh verify    # generate traffic and wait for data in Dynatrace (typically 10–40 min,
 #                                    # a new diagnostic setting can take up to 90 min)
+#   ./scripts/e2e-azure.sh dcr       # (re)try only the DCR export, e.g. after an admin granted the role
 #   ./scripts/e2e-azure.sh down      # delete everything
 #   ./scripts/e2e-azure.sh all       # up + verify + down
 #
@@ -64,6 +65,70 @@ EOF
 load_state() { [ -f "$STATE" ] && . "$STATE" || { echo "no state file; run 'up' first" >&2; exit 1; }; }
 
 # --------------------------------------------------------------------------------------------------------------
+# Export method A. Azure checks at creation time that the DCR's identity may already write to the Event Hub, so the
+# identity (a user-assigned one; a system-assigned identity only exists after the DCR) must get its role first.
+setup_dcr() {     # note: callers use '|| ...', which disables 'set -e' in here, hence the explicit '|| return 1'
+  local SUB HUB_ID KV_DCR_ID UAMI UAMI_ID UAMI_PRINCIPAL DCR DCR_URL DCR_ID NS_ID BODY out i
+  SUB="$(az account show --query id -o tsv)" || return 1
+  DCR="$PREFIX-dcr-rule"; UAMI="$PREFIX-dcr-identity"
+  NS_ID="$(az eventhubs namespace show -g "$RG" -n "$PREFIX-ns" --query id -o tsv)" || return 1
+  HUB_ID="$(az eventhubs eventhub show -g "$RG" --namespace-name "$PREFIX-ns" -n metrics --query id -o tsv)" || return 1
+  KV_DCR_ID="$(az keyvault show -n "$KV_DCR" --query id -o tsv)" || return 1
+
+  log "Export method A: data collection rule (Key Vault '$KV_DCR')"
+  az identity create -g "$RG" -n "$UAMI" -l "$LOCATION" -o none || return 1
+  UAMI_ID="$(az identity show -g "$RG" -n "$UAMI" --query id -o tsv)" || return 1
+  UAMI_PRINCIPAL="$(az identity show -g "$RG" -n "$UAMI" --query principalId -o tsv)" || return 1
+
+  if ! az role assignment create --assignee-object-id "$UAMI_PRINCIPAL" --assignee-principal-type ServicePrincipal \
+         --role "Azure Event Hubs Data Sender" --scope "$NS_ID" -o none; then
+    DCR_ENABLED=0; save_state
+    cat <<MSG
+
+WARNING: you are not allowed to create role assignments, so the DCR export was skipped.
+Continuing with the diagnostic-settings export only. To test the DCR path later, ask someone with
+Owner / User Access Administrator to run:
+
+  az role assignment create --assignee-object-id $UAMI_PRINCIPAL --assignee-principal-type ServicePrincipal \\
+    --role "Azure Event Hubs Data Sender" --scope $NS_ID
+
+and then run:  ./scripts/e2e-azure.sh dcr
+
+MSG
+    return 1
+  fi
+
+  DCR_URL="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Insights/dataCollectionRules/$DCR?api-version=$DCR_API_VERSION"
+  BODY="$(cat <<JSON
+{
+  "location": "$LOCATION",
+  "kind": "PlatformTelemetry",
+  "identity": { "type": "UserAssigned", "userAssignedIdentities": { "$UAMI_ID": {} } },
+  "properties": {
+    "dataSources": { "platformTelemetry": [ {
+      "name": "keyvaultMetrics",
+      "streams": [ "Microsoft.KeyVault/vaults:Metrics-Group-All" ] } ] },
+    "destinations": { "eventHubs": [ { "name": "eh", "eventHubResourceId": "$HUB_ID" } ] },
+    "dataFlows": [ {
+      "streams": [ "Microsoft.KeyVault/vaults:Metrics-Group-All" ],
+      "destinations": [ "eh" ] } ]
+  }
+}
+JSON
+)"
+  for i in 1 2 3 4 5 6; do          # the new role assignment can take a minute to become effective
+    if out="$(printf '%s' "$BODY" | az rest --method put --url "$DCR_URL" --body @- -o none 2>&1)"; then break; fi
+    if echo "$out" | grep -q MissingPermissionsInTheManagedIdentity && [ "$i" -lt 6 ]; then
+      echo "role assignment not effective yet, retrying in 30 s ($i/6)..."; sleep 30
+    else
+      echo "$out" >&2; return 1
+    fi
+  done
+  DCR_ID="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Insights/dataCollectionRules/$DCR"
+  az monitor data-collection rule association create --name "$PREFIX-assoc" --rule-id "$DCR_ID" --resource "$KV_DCR_ID" -o none || return 1
+  DCR_ENABLED=1; save_state
+}
+
 up() {
   need az; need func; need curl
   : "${DT_ENVIRONMENT:?set DT_ENVIRONMENT}"; : "${DT_TOKEN:?set DT_TOKEN}"
@@ -116,52 +181,14 @@ up() {
   log "Deploying the Function code"
   (cd "$ROOT" && func azure functionapp publish "$FUNC" --python)
 
-  log "Export method A: data collection rule (Key Vault '$KV_DCR')"
-  DCR_URL="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Insights/dataCollectionRules/$DCR?api-version=$DCR_API_VERSION"
-  DCR_PRINCIPAL="$(az rest --method put --url "$DCR_URL" --query identity.principalId -o tsv --body @- <<EOF
-{
-  "location": "$LOCATION",
-  "kind": "PlatformTelemetry",
-  "identity": { "type": "SystemAssigned" },
-  "properties": {
-    "dataSources": { "platformTelemetry": [ {
-      "name": "keyvaultMetrics",
-      "streams": [ "Microsoft.KeyVault/vaults:Metrics-Group-All" ] } ] },
-    "destinations": { "eventHubs": [ { "name": "eh", "eventHubResourceId": "$HUB_ID" } ] },
-    "dataFlows": [ {
-      "streams": [ "Microsoft.KeyVault/vaults:Metrics-Group-All" ],
-      "destinations": [ "eh" ] } ]
-  }
-}
-EOF
-)"
-  DCR_ID="/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Insights/dataCollectionRules/$DCR"
-  # A DCR can only write to an Event Hub through its managed identity, so this role assignment is unavoidable.
-  if az role assignment create --assignee-object-id "$DCR_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-       --role "Azure Event Hubs Data Sender" --scope "$NS_ID" -o none; then
-    az monitor data-collection rule association create --name "$PREFIX-assoc" --rule-id "$DCR_ID" --resource "$KV_DCR_ID" -o none
-  else
-    DCR_ENABLED=0
-    save_state
-    cat <<EOF
-
-WARNING: you are not allowed to create role assignments, so the DCR export can't deliver data.
-Continuing with the diagnostic-settings export only. To test the DCR path, ask someone with
-Owner / User Access Administrator to run:
-
-  az role assignment create --assignee-object-id $DCR_PRINCIPAL --assignee-principal-type ServicePrincipal \\
-    --role "Azure Event Hubs Data Sender" --scope $NS_ID
-  az monitor data-collection rule association create --name $PREFIX-assoc --rule-id $DCR_ID --resource $KV_DCR_ID
-
-(then re-run './scripts/e2e-azure.sh verify' after setting DCR_ENABLED=1 in $STATE)
-
-EOF
-  fi
-
   log "Export method B: diagnostic setting (Key Vault '$KV_DIAG')"
   az monitor diagnostic-settings create --name "$PREFIX-diag" --resource "$KV_DIAG_ID" \
     --metrics '[{"category":"AllMetrics","enabled":true}]' \
     --event-hub-rule "$NS_ID/authorizationrules/RootManageSharedAccessKey" --event-hub "$HUB" -o none
+
+
+  # needs a role assignment; on any failure the script continues with diagnostic settings only
+  setup_dcr || { DCR_ENABLED=0; save_state; echo "DCR export not set up (see above); continuing without it. Retry later with: ./scripts/e2e-azure.sh dcr"; }
 
   save_state
   log "Waiting 60 s for role assignments to propagate"
@@ -229,6 +256,7 @@ case "${1:-}" in
   up) up ;;
   verify) verify ;;
   down) down ;;
+  dcr) need az; load_state; setup_dcr ;;
   all) up; rc=0; verify || rc=$?; down; exit $rc ;;
   *) sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac

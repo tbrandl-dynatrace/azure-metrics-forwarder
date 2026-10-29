@@ -6,7 +6,7 @@ Configuration (environment or the git-ignored .env.local):
   DT_TOKEN              token with scope storage:metrics:read (sent as Bearer)
   DT_QUERY_ENVIRONMENT  apps URL, e.g. https://abc12345.apps.dynatrace.com; derived from DT_ENVIRONMENT if unset
 
-CLI:  python scripts/dql.py "<DQL>" [--field NAME]   # prints records as JSON lines, or just one field
+CLI:  python scripts/dql.py [--field NAME] "<DQL>"   # prints records as JSON lines, or just one field
 """
 import json, os, sys, time, urllib.error, urllib.request
 
@@ -54,7 +54,10 @@ def query(dql: str, base_url: str = None, token: str = None, timeout_s: int = 12
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-    field = args[args.index("--field") + 1] if "--field" in args else None
-    for rec in query(args[0]):
-        print(rec.get(field, "") if field else json.dumps(rec))
+    import argparse
+    ap = argparse.ArgumentParser(description="Run a DQL query and print the records.")
+    ap.add_argument("--field", help="print only this field of each record")
+    ap.add_argument("query")
+    args = ap.parse_args()
+    for rec in query(args.query):
+        print(rec.get(args.field, "") if args.field else json.dumps(rec))
