@@ -208,7 +208,7 @@ generate_traffic() {   # Key Vault API hits produce ServiceApiHit / ServiceApiLa
 
 query_dynatrace() {    # prints the resource ids (lower-case) that currently have data for the probe metric (DQL API)
   "$PY" "$ROOT/scripts/dql.py" --field "azure.resource.id" \
-    "timeseries s = sum(\`cloud.azure.microsoft_keyvault.vaults.ServiceApiHit-realtime\`), by:{azure.resource.id}, filter: azure.resource.group == \"${RG,,}\", from: now()-3h | fieldsAdd total = arraySum(s) | filter total > 0 | fields azure.resource.id"
+    "timeseries s = sum(\`cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.metricstream\`), by:{azure.resource.id}, filter: azure.resource.group == \"${RG,,}\", from: now()-3h | fieldsAdd total = arraySum(s) | filter total > 0 | fields azure.resource.id"
 }
 
 verify() {

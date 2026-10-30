@@ -6,7 +6,7 @@ app = func.FunctionApp()
 DT_URL = os.environ["DT_ENVIRONMENT"].rstrip("/") + "/api/v2/metrics/ingest"
 HEADERS = {"Authorization": f"Api-Token {os.environ['DT_TOKEN']}",
            "Content-Type": "text/plain; charset=utf-8"}
-KEY_SUFFIX = "-realtime"          # appended to every metric key to avoid clashing with the native metrics
+KEY_SUFFIX = ".metricstream"       # appended to every metric key to avoid clashing with the native metrics
 
 # The Event Hub, the exporting DCR / diagnostic setting and the monitored resources share one region, so the
 # location is constant per deployment.

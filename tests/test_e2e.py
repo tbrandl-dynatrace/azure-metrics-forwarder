@@ -68,7 +68,7 @@ def test_dcr_event_reaches_dynatrace(dynatrace, load_function):
 
     (line,) = req["lines"]
     p = parse(line)
-    assert p["key"] == "cloud.azure.microsoft_keyvault.vaults.ServiceApiLatency-realtime"
+    assert p["key"] == "cloud.azure.microsoft_keyvault.vaults.ServiceApiLatency.metricstream"
     assert (p["min"], p["max"], p["sum"], p["count"]) == ("11.0", "52.0", "63.0", "2")
     assert int(p["ts"]) == int(dt.datetime(2024, 8, 20, 14, 13, tzinfo=dt.timezone.utc).timestamp() * 1000)
     assert p["dims"] == {
@@ -89,7 +89,7 @@ def test_diagnostic_settings_event_reaches_dynatrace(dynatrace, load_function):
 
     (line,) = dynatrace.lines
     p = parse(line)
-    assert p["key"] == "cloud.azure.microsoft_web.sites.CpuTime-realtime"
+    assert p["key"] == "cloud.azure.microsoft_web.sites.CpuTime.metricstream"
     assert (p["min"], p["max"], p["sum"], p["count"]) == ("0.042", "0.175", "0.217", "2")
     assert p["dims"]["azure.resource.id"] == DIAG_WEBAPP["resourceId"].lower()
     assert p["dims"]["azure.resource.group"] == "rg-001"
@@ -187,7 +187,7 @@ def test_live_metrics_arrive_in_dynatrace(load_function):
               "time": now.strftime("%Y-%m-%dT%H:%M:%S.0000000Z"), "metricName": "E2EProbe", "timeGrain": "PT1M"}
     run([FakeEvent(wrap(record))])                       # raises if the ingest API rejects the request
 
-    dql_text = ("timeseries s = sum(`cloud.azure.microsoft_e2etest.forwarder.E2EProbe-realtime`), "
+    dql_text = ("timeseries s = sum(`cloud.azure.microsoft_e2etest.forwarder.E2EProbe.metricstream`), "
                 f'filter: azure.resource.name == "{name}", from: now()-30m '
                 "| fieldsAdd total = arraySum(s) | fields total")
     deadline = time.time() + 180

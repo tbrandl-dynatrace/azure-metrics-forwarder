@@ -13,7 +13,7 @@ Azure resources ──► Diagnostic setting (AllMetrics) ─┘
 
 The Function ([function_app.py](function_app.py)) is triggered by the Event Hub, converts each metric record to Dynatrace line protocol (`gauge,min,max,sum,count`) and posts it to `/api/v2/metrics/ingest`.
 
-- Metric keys follow the Dynatrace Azure convention `cloud.azure.<provider_namespace>.<resource_type>.<MetricName>` with a `-realtime` suffix (configurable via `KEY_SUFFIX`) so they don't clash with the metrics from the native Azure integration.
+- Metric keys follow the Dynatrace Azure convention `cloud.azure.<provider_namespace>.<resource_type>.<MetricName>` with a `.metricstream` suffix (configurable via `KEY_SUFFIX`) so they don't clash with the metrics from the native Azure integration.
 - Attributes set: `cloud.provider`, `azure.subscription`, `azure.resource.group`, `azure.resource.id`, `azure.resource.name`, `azure.resource.type`, `azure.location`, plus the metric's own dimensions (DCR export only).
 - Records that aren't metrics (e.g. resource logs sent to the same hub by a diagnostic setting) are ignored.
 
@@ -134,7 +134,7 @@ For identity-based access, grant the Function's managed identity **Azure Event H
 - Check Function invocations and failures (Application Insights), and Event Hub incoming messages.
 - In Dynatrace, confirm the metrics exist, e.g.:
   ```
-  timeseries avg(cloud.azure.microsoft_keyvault.vaults.ServiceApiLatency-realtime), by:{azure.resource.id}, from:now()-1h
+  timeseries avg(cloud.azure.microsoft_keyvault.vaults.ServiceApiLatency.metricstream), by:{azure.resource.id}, from:now()-1h
   ```
 - Compare against the existing `cloud.azure.*` metric's dimensions and adjust the `dims` dict in `to_line()` if your tenant uses different attribute names (e.g. `azure.resourceId`).
 - DCR troubleshooting: [DCR monitoring](https://learn.microsoft.com/en-us/azure/azure-monitor/data-collection/data-collection-monitor).
