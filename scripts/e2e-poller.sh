@@ -6,7 +6,7 @@
 #
 #   az login                         # interactive (MFA); then: az account set --subscription <id>
 #   ./scripts/e2e-poller.sh up       # resource group + Key Vault + python venv (~2 min)
-#   ./scripts/e2e-poller.sh run      # traffic + poll every minute until the vault's metrics are in Dynatrace
+#   ./scripts/e2e-poller.sh run      # traffic + poll every minute until counter AND gauge values in Dynatrace match Azure
 #   ./scripts/e2e-poller.sh latency [--minutes 15] [--run-poller] [--csv out.csv]
 #   ./scripts/e2e-poller.sh latency --continuous [--run-poller]   # keeps running until Ctrl-C
 #                                    # continuous traffic + per-minute latency report (Azure Monitor and Dynatrace)
@@ -24,7 +24,7 @@ export MSYS_NO_PATHCONV=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE="$ROOT/.e2e-poller-state.env"
 LOCATION="${LOCATION:-westeurope}"
-MAX_WAIT_MIN="${MAX_WAIT_MIN:-15}"
+MAX_WAIT_MIN="${MAX_WAIT_MIN:-25}"
 PY="$(command -v python3 || command -v python)"
 VENV="$ROOT/.venv-e2e"
 
@@ -65,28 +65,27 @@ traffic() {   # Key Vault API calls produce the ServiceApiHit metric
   done
 }
 
-in_dynatrace() {   # prints the vault's resource id if its metric has arrived (DQL API)
-  "$PYBIN" "$ROOT/scripts/dql.py" --field "azure.resource.id" \
-    "timeseries s = sum(\`cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.metricstream\`), by:{azure.resource.id}, filter: azure.resource.group == \"${RG,,}\", from: now()-1h | fieldsAdd total = arraySum(s) | filter total > 0 | fields azure.resource.id"
-}
-
 run() {
   : "${DT_ENVIRONMENT:?set DT_ENVIRONMENT}"; : "${DT_TOKEN:?set DT_TOKEN}"
   load_state
   PYBIN="$VENV/bin/python"; [ -x "$PYBIN" ] || PYBIN="$VENV/Scripts/python"
 
-  log "Traffic + poll every minute (max ${MAX_WAIT_MIN} min). Azure needs ~2-3 min before the first minute is readable."
+  log "Traffic + poll every minute (max ${MAX_WAIT_MIN} min). Success = 3 minutes (each at least 5 minutes old) whose values in Dynatrace equal Azure's own: ServiceApiHit as counter, ServiceApiLatency as gauge."
   local deadline=$(( $(date +%s) + MAX_WAIT_MIN * 60 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     traffic
     echo "$(date +%H:%M:%S) polling"
     "$PYBIN" "$ROOT/scripts/poll_once.py" "$SUB" || echo "poll failed (see above)"
-    found="$(in_dynatrace || true)"
-    if echo "$found" | grep -qi "/vaults/$KV\$"; then
-      log "SUCCESS: metrics of $KV were read from Azure Monitor by the poller and arrived in Dynatrace"
+    rc=0
+    "$PYBIN" "$ROOT/scripts/verify_values.py" "$SUB" "$RG" "$KV" || rc=$?
+    if [ "$rc" = 0 ]; then
+      log "SUCCESS: counter (ServiceApiHit) and gauge (ServiceApiLatency) read from Azure Monitor by the poller match Azure's own values in Dynatrace"
       return 0
+    elif [ "$rc" = 1 ]; then
+      log "FAILED: Dynatrace values differ from Azure (see MISMATCH lines above)"
+      return 1
     fi
-    echo "not in Dynatrace yet"
+    [ "$rc" = 3 ] && echo "comparison could not run (see above); retrying"       || echo "not enough comparable minutes yet (need 3 that are at least 5 minutes old); continuing"
     sleep 55
   done
 
@@ -96,6 +95,7 @@ run() {
   - 'polled ...: forwarding 0 data points': Azure had no data yet for that minute, or Resource Graph has not indexed the
     new vault's tag yet (takes a few minutes); keep running, or raise MAX_WAIT_MIN
   - poll OK but nothing in Dynatrace: check DT_TOKEN scopes (metrics.ingest, storage:metrics:read)
+  - 'not enough comparable minutes': the check needs 3 minutes older than 5 min with data on both sides; keep running
 EOF
   return 1
 }

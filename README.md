@@ -250,7 +250,14 @@ The script hasn't been run yet; expect to adjust `az` flags for your CLI version
 
 ### Real end-to-end test of the poller
 
-[scripts/e2e-poller.sh](scripts/e2e-poller.sh) creates a resource group with one Key Vault tagged `dynatrace-metrics=true` (so tag discovery is exercised too), generates Key Vault traffic and runs the `poll` handler on your machine once a minute (using your `az login`, so no role assignment or deployment is needed) until the vault's metrics show up in Dynatrace (checked with DQL). Needs `az` and python3.
+[scripts/e2e-poller.sh](scripts/e2e-poller.sh) creates a resource group with one Key Vault tagged `dynatrace-metrics=true` (so tag discovery is exercised too), generates Key Vault traffic and runs the `poll` handler on your machine once a minute (using your `az login`, so no role assignment or deployment is needed). It passes when, for 3 minutes that are at least 5 minutes old, the values in Dynatrace equal what Azure Monitor itself reports for the vault ([scripts/verify_values.py](scripts/verify_values.py)), for **both metric kinds**:
+
+| Kind | Metric | Azure aggregation | Sent as | Checked |
+|---|---|---|---|---|
+| counter | `ServiceApiHit` | Total | `count,delta` | Dynatrace sum per minute = Azure total |
+| gauge | `ServiceApiLatency` | Average | `gauge,min,max,sum,count` | Dynatrace min / max / avg = Azure minimum / maximum / average |
+
+It also checks that Azure's metric definitions classify the two metrics that way. Needs `az` and python3.
 
 ```bash
 az login
