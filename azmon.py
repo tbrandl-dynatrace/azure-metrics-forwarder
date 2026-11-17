@@ -112,8 +112,9 @@ def list_resources(subscription, resource_type, resource_group=None):
 def fetch_records(entry, start, end):
     """Query one AZMON_CONFIG entry and return flat metric records (dicts) for the [start, end) minute."""
     resources = list_resources(entry["subscription"], entry["resourceType"], entry.get("resourceGroup"))
+    kinds = metric_kinds(resources[0][0], entry["resourceType"]) if resources else {}
     return query_batch(entry["subscription"], entry["resourceType"], resources, entry["metrics"],
-                       entry.get("dimensions"), int(entry.get("top", 100)), start, end)
+                       entry.get("dimensions"), int(entry.get("top", 100)), start, end, kinds)
 
 
 # --- tag-based discovery -------------------------------------------------------------------------------------------
@@ -149,22 +150,38 @@ def discover_tagged(tag, subscriptions=None):
     return rows
 
 
-def metric_names(resource_id, resource_type):
-    """Names of the per-minute metrics of a resource type that can be queried without a dimension filter (cached)."""
+def metric_definitions(resource_id, resource_type):
+    """Metric definitions of a resource type (cached): [{"name", "kind", "usable"}].
+    usable: per-minute grain available and no dimension filter required.
+    kind:   "count" for metrics Azure aggregates as a Total (hits, bytes, transactions ... summed per minute, i.e. counters),
+            "gauge" for everything else (Average / Minimum / Maximum / Count primary aggregation: percentages, latencies, sizes)."""
     key = resource_type.lower()
     hit = _definition_cache.get(key)
     if hit and time.time() - hit[0] < DEFINITION_CACHE_SECONDS:
         return hit[1]
     body = _request("GET", f"{ARM_URL}{resource_id}/providers/Microsoft.Insights/metricDefinitions", ARM_SCOPE,
                     params={"api-version": DEFINITIONS_API_VERSION})
-    names = []
+    defs = []
     for d in body.get("value", []):
         name = (d.get("name") or {}).get("value")
+        if not name or any(x["name"] == name for x in defs):
+            continue
         grains = [a.get("timeGrain") for a in d.get("metricAvailabilities") or []]
-        if name and name not in names and not d.get("isDimensionRequired") and (not grains or "PT1M" in grains):
-            names.append(name)
-    _definition_cache[key] = (time.time(), names)
-    return names
+        defs.append({"name": name,
+                     "kind": "count" if str(d.get("primaryAggregationType", "")).lower() == "total" else "gauge",
+                     "usable": not d.get("isDimensionRequired") and (not grains or "PT1M" in grains)})
+    _definition_cache[key] = (time.time(), defs)
+    return defs
+
+
+def metric_names(resource_id, resource_type):
+    """Names of the per-minute metrics of a resource type that can be queried without a dimension filter."""
+    return [d["name"] for d in metric_definitions(resource_id, resource_type) if d["usable"]]
+
+
+def metric_kinds(resource_id, resource_type):
+    """{lower-case metric name: "count" | "gauge"} for a resource type."""
+    return {d["name"].lower(): d["kind"] for d in metric_definitions(resource_id, resource_type)}
 
 
 def metrics_from_tag_value(value):
@@ -185,13 +202,13 @@ def fetch_tagged(tag, subscriptions, start, end):
         metrics = list(selection) if selection else metric_names(rows[0]["id"], rtype)
         if metrics:
             records += query_batch(sub, rtype, [(r["id"], r.get("location") or "global") for r in rows],
-                                   metrics, None, 100, start, end)
+                                   metrics, None, 100, start, end, metric_kinds(rows[0]["id"], rtype))
     return records
 
 
 # --- Metrics Batch API ---------------------------------------------------------------------------------------------
 
-def query_batch(subscription, resource_type, resources, metrics, dimensions, top, start, end):
+def query_batch(subscription, resource_type, resources, metrics, dimensions, top, start, end, kinds=None):
     """Metrics for [(resource id, location)] of one type; batches by region, 50 resources and 20 metrics per call."""
     by_region = defaultdict(list)
     for rid, location in resources:
@@ -211,11 +228,11 @@ def query_batch(subscription, resource_type, resources, metrics, dimensions, top
             for i in range(0, len(ids), MAX_RESOURCES_PER_BATCH):
                 body = _request("POST", url, METRICS_SCOPE, params=call_params,
                                 json={"resourceids": ids[i:i + MAX_RESOURCES_PER_BATCH]})
-                records += parse_batch_response(body)
+                records += parse_batch_response(body, kinds)
     return records
 
 
-def parse_batch_response(body):
+def parse_batch_response(body, kinds=None):
     """values[].value[].timeseries[].data[] -> flat records with the same field names as the Event Hub exports."""
     records = []
     for res in body.get("values", []):
@@ -235,6 +252,7 @@ def parse_batch_response(body):
                         continue
                     records.append({
                         "resourceId": res["resourceid"], "location": res.get("resourceregion"), "metricName": metric["name"]["value"],
+                        "kind": (kinds or {}).get(metric["name"]["value"].lower(), "gauge"),
                         "time": point["timeStamp"], "unit": metric.get("unit"), "timeGrain": "PT1M",
                         "count": point.get("count"), "total": point.get("total"),
                         "minimum": point.get("minimum"), "maximum": point.get("maximum"),

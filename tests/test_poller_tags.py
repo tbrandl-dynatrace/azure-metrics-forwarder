@@ -1,4 +1,6 @@
 """Tag-based discovery for the poller: tag a resource, its per-minute metrics are found and forwarded automatically."""
+import re
+
 import pytest
 
 from test_e2e import parse
@@ -7,9 +9,12 @@ from test_poller import CONFIG, KV, POINT, SUB, batch_value
 STORAGE = f"/subscriptions/{SUB}/resourceGroups/rg-2/providers/Microsoft.Storage/storageAccounts"
 
 
-def definition(name, grains=("PT1M",), dim_required=False):
-    return {"name": {"value": name, "localizedValue": name}, "isDimensionRequired": dim_required,
-            "metricAvailabilities": [{"timeGrain": g, "retention": "P93D"} for g in grains]}
+def definition(name, grains=("PT1M",), dim_required=False, agg=None):
+    d = {"name": {"value": name, "localizedValue": name}, "isDimensionRequired": dim_required,
+         "metricAvailabilities": [{"timeGrain": g, "retention": "P93D"} for g in grains]}
+    if agg:
+        d["primaryAggregationType"] = agg
+    return d
 
 
 def row(rid, rtype, value="true", location="westeurope", sub=SUB):
@@ -134,3 +139,43 @@ def test_metrics_failing_for_a_resource_are_skipped(dynatrace, tagged, load_poll
     poll = load_poller(dynatrace.url, None, tag="dynatrace-metrics")
     poll(None)
     assert [parse(l)["key"].split(".")[-2] for l in dynatrace.lines] == ["ServiceApiHit"]
+
+
+COUNTER = re.compile(r'^(?P<key>[^, ]+),(?P<dims>.*) count,delta=(?P<delta>[^ ]+) (?P<ts>\d+)$')
+
+
+def test_total_metrics_are_sent_as_counters_and_the_rest_as_gauges(dynatrace, tagged, load_poller):
+    tagged.graph_rows = [row(f"{KV}/vault-a", "microsoft.keyvault/vaults")]
+    tagged.definitions = {"microsoft.keyvault/vaults": [definition("ServiceApiHit", agg="Total"),
+                                                         definition("Availability", agg="Average"),
+                                                         definition("ServiceApiLatency", agg="Average")]}
+    poll = load_poller(dynatrace.url, None, tag="dynatrace-metrics")
+    poll(None)
+
+    by_metric = {l.split(",")[0].split(".")[-2]: l for l in dynatrace.lines}
+    hit = COUNTER.match(by_metric["ServiceApiHit"])
+    assert hit, by_metric["ServiceApiHit"]
+    assert hit["delta"] == "6.0"                                             # the minute's total, not min/max/count
+    assert "gauge" not in by_metric["ServiceApiHit"]
+    assert parse(by_metric["Availability"])["type"] == "gauge"               # gauge summary as before
+    assert parse(by_metric["ServiceApiLatency"])["sum"] == "6.0"
+    assert 'azure.resource.name="vault-a"' in by_metric["ServiceApiHit"]
+
+
+def test_explicit_config_classifies_metrics_too(dynatrace, azure, load_poller):
+    azure.resources = [{"id": f"{KV}/vault-a", "location": "westeurope"}]
+    azure.definitions = {"microsoft.keyvault/vaults": [definition("ServiceApiHit", agg="Total"),
+                                                       definition("ServiceApiLatency", agg="Average")]}
+    azure.batch_response = answer_with_every_requested_metric
+    poll = load_poller(dynatrace.url, CONFIG)
+    poll(None)
+    kinds = {l.split(",")[0].split(".")[-2]: ("count" if " count,delta=" in l else "gauge") for l in dynatrace.lines}
+    assert kinds == {"ServiceApiHit": "count", "ServiceApiLatency": "gauge"}
+
+
+def test_metrics_without_definition_info_stay_gauges(dynatrace, tagged, load_poller):
+    tagged.graph_rows = [row(f"{KV}/vault-a", "microsoft.keyvault/vaults", value="ServiceApiHit")]
+    tagged.definitions = {}                                                  # nothing known about the type
+    poll = load_poller(dynatrace.url, None, tag="dynatrace-metrics")
+    poll(None)
+    assert [parse(l)["type"] for l in dynatrace.lines] == ["gauge"]

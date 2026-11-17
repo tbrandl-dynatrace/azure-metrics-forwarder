@@ -98,8 +98,11 @@ def to_line(raw: dict):
 
     ts = dt.datetime.strptime(r["time"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc)
     dim_s = ",".join(f'{dim_key(k)}="{esc(v)}"' for k, v in dims.items())
-    return (f'{metric_key(p, r["metricname"])},{dim_s} '
-            f'gauge,min={float(r["minimum"])},max={float(r["maximum"])},'
+    key = f'{metric_key(p, r["metricname"])},{dim_s}'
+    if r.get("kind") == "count":
+        # Azure aggregates this metric as a Total per minute, i.e. a counter: send the minute's increase as a counter delta
+        return f'{key} count,delta={float(r["total"])} {int(ts.timestamp() * 1000)}'
+    return (f'{key} gauge,min={float(r["minimum"])},max={float(r["maximum"])},'
             f'sum={float(r["total"])},count={count:g} {int(ts.timestamp() * 1000)}')
 
 
