@@ -126,20 +126,25 @@ def run(events: List[func.EventHubEvent]):
 
 
 # Alternative to the Event Hub pipeline: poll the Azure Monitor metrics API every minute for the minute that is
-# AZMON_DELAY_MINUTES (default 2) old and forward it. Does nothing unless AZMON_CONFIG is set (see azmon.py).
+# AZMON_DELAY_MINUTES (default 2) old and forward it. Does nothing unless AZMON_TAG or AZMON_CONFIG is set (see azmon.py).
 # Don't poll resources that are also exported through a DCR / diagnostic setting.
 @app.timer_trigger(schedule="0 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def poll(timer: func.TimerRequest) -> None:
-    raw = os.environ.get("AZMON_CONFIG")
-    if not raw:
-        logging.info("AZMON_CONFIG not set; metrics polling is disabled")
+    raw, tag = os.environ.get("AZMON_CONFIG"), os.environ.get("AZMON_TAG")
+    if not raw and not tag:
+        logging.info("neither AZMON_TAG nor AZMON_CONFIG is set; metrics polling is disabled")
         return
     start, end = azmon.target_window(delay_minutes=int(os.environ.get("AZMON_DELAY_MINUTES", "2")))
+    records = []
+    for entry in azmon.load_config(raw) if raw else []:
+        records += azmon.fetch_records(entry, start, end)
+    if tag:
+        subscriptions = [s.strip() for s in os.environ.get("AZMON_SUBSCRIPTIONS", "").split(",") if s.strip()] or None
+        records += azmon.fetch_tagged(tag, subscriptions, start, end)
     lines = []
-    for entry in azmon.load_config(raw):
-        for r in azmon.fetch_records(entry, start, end):
-            line = to_line(r)
-            if line:
-                lines.append(line)
+    for r in records:
+        line = to_line(r)
+        if line:
+            lines.append(line)
     logging.info("polled %s: forwarding %d data points", start.strftime("%H:%M"), len(lines))
     post_lines(lines)

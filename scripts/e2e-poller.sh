@@ -10,6 +10,7 @@
 #   ./scripts/e2e-poller.sh latency [--minutes 15] [--run-poller] [--csv out.csv]
 #   ./scripts/e2e-poller.sh latency --continuous [--run-poller]   # keeps running until Ctrl-C
 #                                    # continuous traffic + per-minute latency report (Azure Monitor and Dynatrace)
+#   ./scripts/e2e-poller.sh tag      # tag a vault created before tag support (dynatrace-metrics=true)
 #   ./scripts/e2e-poller.sh down     # delete everything
 #   ./scripts/e2e-poller.sh all      # up + run + down
 #
@@ -48,7 +49,7 @@ up() {
   log "Resource group + Key Vault ($RG, $LOCATION)"
   az provider register --namespace Microsoft.KeyVault --wait -o none
   az group create -n "$RG" -l "$LOCATION" -o none
-  az keyvault create -g "$RG" -n "$KV" -l "$LOCATION" --enable-rbac-authorization false -o none
+  az keyvault create -g "$RG" -n "$KV" -l "$LOCATION" --enable-rbac-authorization false --tags dynatrace-metrics=true -o none
 
   log "Python environment"
   "$PY" -m venv "$VENV"
@@ -79,7 +80,7 @@ run() {
   while [ "$(date +%s)" -lt "$deadline" ]; do
     traffic
     echo "$(date +%H:%M:%S) polling"
-    "$PYBIN" "$ROOT/scripts/poll_once.py" "$SUB" "$RG" "Microsoft.KeyVault/vaults" "ServiceApiHit,ServiceApiLatency" || echo "poll failed (see above)"
+    "$PYBIN" "$ROOT/scripts/poll_once.py" "$SUB" || echo "poll failed (see above)"
     found="$(in_dynatrace || true)"
     if echo "$found" | grep -qi "/vaults/$KV\$"; then
       log "SUCCESS: metrics of $KV were read from Azure Monitor by the poller and arrived in Dynatrace"
@@ -92,7 +93,8 @@ run() {
   log "TIMEOUT. Where to look:"
   cat <<EOF
   - 'poll failed' with 401/403 from metrics.monitor.azure.com: you need Monitoring Reader on the subscription
-  - 'polled ...: forwarding 0 data points': Azure had no data yet for that minute; keep running, or raise MAX_WAIT_MIN
+  - 'polled ...: forwarding 0 data points': Azure had no data yet for that minute, or Resource Graph has not indexed the
+    new vault's tag yet (takes a few minutes); keep running, or raise MAX_WAIT_MIN
   - poll OK but nothing in Dynatrace: check DT_TOKEN scopes (metrics.ingest, storage:metrics:read)
 EOF
   return 1
@@ -103,6 +105,12 @@ latency() {   # continuous traffic; reports how long each minute takes to appear
   load_state
   PYBIN="$VENV/bin/python"; [ -x "$PYBIN" ] || PYBIN="$VENV/Scripts/python"
   "$PYBIN" "$ROOT/scripts/latency_probe.py" --sub "$SUB" --rg "$RG" --vault "$KV" "$@"
+}
+
+tag() {   # (re)apply the discovery tag to the test vault, e.g. for a vault created before tag support
+  load_state
+  az tag update --resource-id "$(az keyvault show -n "$KV" --query id -o tsv)" --operation merge --tags dynatrace-metrics=true -o none
+  echo "tagged $KV with dynatrace-metrics=true (Resource Graph needs a few minutes to see it)"
 }
 
 down() {
@@ -116,8 +124,9 @@ down() {
 case "${1:-}" in
   up) up ;;
   run) run ;;
+  tag) tag ;;
   latency) shift; latency "$@" ;;
   down) down ;;
   all) up; rc=0; run || rc=$?; down; exit $rc ;;
-  *) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 1 ;;
+  *) sed -n '2,19p' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac

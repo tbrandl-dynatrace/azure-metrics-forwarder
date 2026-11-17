@@ -147,12 +147,42 @@ The same Function app also contains a second function, `poll` ([function_app.py]
 timer (every minute) → ARM: list resources of the type → Metrics Batch API (per region, ≤50 resources/call) → Dynatrace
 ```
 
-Unlike the export pipelines it needs no Event Hub and has no setup lag, and it gives you the real region per resource (`azure.location`). It is disabled until `AZMON_CONFIG` is set.
+Unlike the export pipelines it needs no Event Hub and has no setup lag, and it gives you the real region per resource (`azure.location`). It is disabled until `AZMON_TAG` or `AZMON_CONFIG` is set.
+
+### Choosing what to poll: just tag it
+
+Set the app setting `AZMON_TAG` to a tag name, e.g. `dynatrace-metrics`, and then **tag the Azure resources you want in Dynatrace** with that tag. That's all: resources are found with Azure Resource Graph (across every subscription the Function's identity can read, new tags are picked up within ~10 minutes), and **all their per-minute metrics are collected automatically** from the metric definitions of their resource type (metrics that need a dimension filter or have no 1-minute grain are skipped).
+
+```bash
+# tell the poller which tag to look for (once)
+az functionapp config appsettings set -g <rg> -n <function-app> --settings AZMON_TAG=dynatrace-metrics
+
+# then tag whatever should be monitored, any resource type
+az tag update --resource-id <resource id> --operation merge --tags dynatrace-metrics=true
+```
+
+The tag value controls the metrics:
+
+| Tag value | Effect |
+|---|---|
+| `true` (or `all`, `yes`, `on`, `1`, `*`, empty) | all per-minute metrics of the resource |
+| `ServiceApiHit;ServiceApiLatency` (`,` or `;` separated) | only these metrics |
+| `false`, `no`, `off`, `0`, `none` | resource is not polled (handy to switch a resource off without removing the tag) |
+
+Tag *names* are matched exactly as written; the value matching above is case-insensitive. Tag a resource group or subscription? Azure tags don't inherit, so tag the resources themselves (an Azure Policy with the *Inherit a tag from the resource group* effect can do that for you).
 
 | Setting | Value |
 |---|---|
-| `AZMON_CONFIG` | JSON list, one entry per resource type to poll (below). Unset = polling off. |
-| `AZMON_DELAY_MINUTES` | Optional, default `2` |
+| `AZMON_TAG` | Tag name to look for. Setting it enables tag-based polling. |
+| `AZMON_SUBSCRIPTIONS` | Optional, comma-separated subscription IDs to limit the search (default: all the identity can read). |
+| `AZMON_DELAY_MINUTES` | Optional, default `2`. |
+| `AZMON_CONFIG` | Optional advanced override, see below. Can be combined with `AZMON_TAG`. |
+
+**Cost / volume:** "all metrics" can be a lot of data points per resource (a VM has dozens of metrics, every minute). Restrict via the tag value for chatty resource types, or start with a few resources and check the ingest volume in Dynatrace.
+
+### Explicit configuration (optional)
+
+`AZMON_CONFIG` selects resources by type (and optionally resource group) and lets you split metrics by dimension, which the tag mode doesn't do:
 
 ```json
 [{"subscription": "<subscription id>",
@@ -163,7 +193,7 @@ Unlike the export pipelines it needs no Event Hub and has no setup lag, and it g
   "top": 100}]
 ```
 
-`dimensions` (optional) splits the metrics by those dimension names (`<dim> eq '*'`); `top` caps the series per metric and resource (default 100). Without `dimensions` values are aggregated across dimensions.
+`dimensions` (optional) splits the metrics by those dimension names (`<dim> eq '*'`); `top` caps the series per metric and resource (default 100). Without `dimensions` values are aggregated across dimensions. Resources are all resources of that type in the subscription (or resource group).
 
 **Azure permissions:** the Function's managed identity needs **Monitoring Reader on each polled subscription** (the batch API requires it at subscription level; having it on the resources alone is not enough). That is a role assignment, so someone with Owner / User Access Administrator has to grant it:
 
@@ -173,17 +203,17 @@ az role assignment create --assignee-object-id <principalId> --assignee-principa
   --role "Monitoring Reader" --scope /subscriptions/<subscription id>
 ```
 
-Locally (`func start`) the Function uses your `az login` instead, so it works with whatever access you have.
+Finding tagged resources only needs *Reader* (Azure Resource Graph). Locally (`func start`) the Function uses your `az login` instead, so it works with whatever access you have.
 
 **Notes**
 - Don't poll resources that are also exported through a DCR or diagnostic setting: you'd ingest the same points twice.
-- Metric names are the Azure Monitor metric names (`ServiceApiHit`), as in the exports. Namespaces other than the resource type (custom / guest metrics) aren't supported by the batch API.
+- Metric names are the Azure Monitor metric names (`ServiceApiHit`), as in the exports. Namespaces other than the resource type (custom / guest metrics) aren't supported by the batch API. A metric Azure rejects for a resource is logged once and skipped.
 - The resource list is cached for 10 minutes, so new resources show up with that delay. A run that fails (Azure throttling, Dynatrace outage) loses that minute; there is no replay as with Event Hubs.
 - Large estates: each run makes one batch call per (region, 50 resources) and metric set; the API is throttled, so keep `metrics` lists and resource types focused. The timer runs sequentially and has to finish within the minute.
 
 ## Testing
 
-[tests/test_poller.py](tests/test_poller.py) does the same for the polling function against a mock of ARM and the Metrics Batch API (batching, regions, dimensions, error handling, the 2-minute window). [tests/test_e2e.py](tests/test_e2e.py) runs the Function handler the way the Functions host does (a batch of Event Hub events) and checks the real HTTP requests it sends to a local mock of the Dynatrace ingest API. It uses the example payloads from the Microsoft docs for both export methods and covers attributes and metric keys, DCR/diagnostic-settings parity, ignoring log records, 1,000-line batching, escaping, and error propagation (so Event Hubs retries).
+[tests/test_poller.py](tests/test_poller.py) and [tests/test_poller_tags.py](tests/test_poller_tags.py) do the same for the polling function (explicit config and tag discovery) against a mock of ARM and the Metrics Batch API (batching, regions, dimensions, error handling, the 2-minute window). [tests/test_e2e.py](tests/test_e2e.py) runs the Function handler the way the Functions host does (a batch of Event Hub events) and checks the real HTTP requests it sends to a local mock of the Dynatrace ingest API. It uses the example payloads from the Microsoft docs for both export methods and covers attributes and metric keys, DCR/diagnostic-settings parity, ignoring log records, 1,000-line batching, escaping, and error propagation (so Event Hubs retries).
 
 ```bash
 pip install -r requirements-dev.txt
@@ -219,7 +249,7 @@ The script hasn't been run yet; expect to adjust `az` flags for your CLI version
 
 ### Real end-to-end test of the poller
 
-[scripts/e2e-poller.sh](scripts/e2e-poller.sh) creates a resource group with one Key Vault, generates Key Vault traffic and runs the `poll` handler on your machine once a minute (using your `az login`, so no role assignment or deployment is needed) until the vault's metrics show up in Dynatrace (checked with DQL). Needs `az` and python3.
+[scripts/e2e-poller.sh](scripts/e2e-poller.sh) creates a resource group with one Key Vault tagged `dynatrace-metrics=true` (so tag discovery is exercised too), generates Key Vault traffic and runs the `poll` handler on your machine once a minute (using your `az login`, so no role assignment or deployment is needed) until the vault's metrics show up in Dynatrace (checked with DQL). Needs `az` and python3.
 
 ```bash
 az login

@@ -100,6 +100,10 @@ class MockAzure:
         self.resources = []         # [{"id", "location"}]
         self.batch_calls = []       # [{"region", "subscription", "params", "resourceids"}]
         self.arm_calls = 0
+        self.graph_rows = []        # Azure Resource Graph result rows: {id, type, location, subscriptionId, v}
+        self.graph_calls = []       # request bodies sent to Resource Graph
+        self.definitions = {}       # lower-case resource type -> metricDefinitions "value" list
+        self.definition_calls = []
         self.batch_response = lambda call: {"values": []}
 
         outer = self
@@ -114,14 +118,24 @@ class MockAzure:
                 self.wfile.write(data)
 
             def do_GET(self):
+                if "/metricDefinitions" in self.path:                # <resource id>/providers/Microsoft.Insights/metricDefinitions
+                    outer.definition_calls.append(self.path)
+                    rtype = self.path.lower().split("/providers/", 1)[1].split("/providers/microsoft.insights")[0]
+                    for key, defs in outer.definitions.items():
+                        if rtype.startswith(key):
+                            return self._send({"value": defs})
+                    return self._send({"value": []})
                 outer.arm_calls += 1
                 self._send({"value": outer.resources})
 
             def do_POST(self):
                 from urllib.parse import urlparse, parse_qs
                 u = urlparse(self.path)
-                parts = u.path.strip("/").split("/")                 # <region>/subscriptions/<sub>/metrics:getBatch
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                if u.path.startswith("/providers/Microsoft.ResourceGraph"):
+                    outer.graph_calls.append(body)
+                    return self._send({"data": outer.graph_rows})
+                parts = u.path.strip("/").split("/")                 # <region>/subscriptions/<sub>/metrics:getBatch
                 call = {"region": parts[0], "subscription": parts[2],
                         "params": {k: v[0] for k, v in parse_qs(u.query).items()}, "resourceids": body["resourceids"],
                         "auth": self.headers.get("Authorization")}
@@ -150,7 +164,7 @@ def azure():
 def load_poller(monkeypatch, azure):
     """Import function_app / azmon fresh, pointed at the mock Azure and the given Dynatrace URL; returns poll()."""
 
-    def _load(dt_environment, config, location="westeurope", delay=None):
+    def _load(dt_environment, config, location="westeurope", delay=None, tag=None, subscriptions=None):
         monkeypatch.setenv("DT_ENVIRONMENT", dt_environment)
         monkeypatch.setenv("DT_TOKEN", "test-token")
         monkeypatch.setenv("AZURE_LOCATION", location)
@@ -162,6 +176,14 @@ def load_poller(monkeypatch, azure):
             monkeypatch.setenv("AZMON_CONFIG", json.dumps(config))
         if delay is not None:
             monkeypatch.setenv("AZMON_DELAY_MINUTES", str(delay))
+        if tag is None:
+            monkeypatch.delenv("AZMON_TAG", raising=False)
+        else:
+            monkeypatch.setenv("AZMON_TAG", tag)
+        if subscriptions is None:
+            monkeypatch.delenv("AZMON_SUBSCRIPTIONS", raising=False)
+        else:
+            monkeypatch.setenv("AZMON_SUBSCRIPTIONS", ",".join(subscriptions))
         for m in ("function_app", "azmon"):
             sys.modules.pop(m, None)
         azmon = importlib.import_module("azmon")
