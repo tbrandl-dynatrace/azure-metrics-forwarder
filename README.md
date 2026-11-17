@@ -217,6 +217,32 @@ Exported environment variables take precedence over `.env.local`. The same file 
 
 The script hasn't been run yet; expect to adjust `az` flags for your CLI version.
 
+### Real end-to-end test of the poller
+
+[scripts/e2e-poller.sh](scripts/e2e-poller.sh) creates a resource group with one Key Vault, generates Key Vault traffic and runs the `poll` handler on your machine once a minute (using your `az login`, so no role assignment or deployment is needed) until the vault's metrics show up in Dynatrace (checked with DQL). Needs `az` and python3.
+
+```bash
+az login
+./scripts/e2e-poller.sh all      # or: up / run / down
+```
+
+### Measuring latency
+
+`./scripts/e2e-poller.sh latency` keeps calling the test Key Vault (~2 calls/s) so that every minute carries data, and every 15 s checks both Azure Monitor and Dynatrace for which minutes are visible. For each full minute it reports how long after the end of that minute the data point first appeared in Azure Monitor, in Dynatrace, and the difference (the pipeline's own share), plus p50 / p95 / max (`--csv` saves the rows). It only looks at the metric in Dynatrace, so it measures whichever pipeline is feeding the vault; `--run-poller` runs the poller locally once a minute, or point a DCR / diagnostic setting at the vault instead.
+
+```bash
+./scripts/e2e-poller.sh up                                    # once
+./scripts/e2e-poller.sh latency --minutes 15 --run-poller     # ~25 min incl. draining
+```
+
+For demos or long soak tests, `--continuous` runs until you press Ctrl-C: it prints a row as each minute arrives, a rolling summary of the last 30 minutes every 5 minutes (`--summary-every`), and a final summary on exit. Traffic generation keeps going the whole time, and minutes only count as missing from Dynatrace after `--drain-minutes` (default 10).
+
+```bash
+./scripts/e2e-poller.sh latency --continuous --run-poller
+```
+
+Expect the poller to be roughly the configured delay (2 min) plus Azure's own availability delay plus up to a minute of timer granularity.
+
 These tests don't cover the Azure side (DCR / diagnostic setting → Event Hub delivery); verify that with the steps in [Validate](#validate).
 
 ## Dynatrace API reference

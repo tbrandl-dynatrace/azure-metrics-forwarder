@@ -6,3 +6,6 @@ __pycache__/
 .azure/
 .e2e-state.env
 .env.local
+.e2e-poller-state.env
+.venv-e2e/
+latency-results*.csv
