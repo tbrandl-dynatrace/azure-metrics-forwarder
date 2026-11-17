@@ -1,5 +1,7 @@
-import os, re, json, datetime as dt, requests, azure.functions as func
+import logging, os, re, json, datetime as dt, requests, azure.functions as func
 from typing import List
+
+import azmon
 
 app = func.FunctionApp()
 
@@ -86,8 +88,9 @@ def to_line(raw: dict):
         "azure.resource.name": p["name"],
         "azure.resource.type": p["arm_type"],
     }
-    if LOCATION:
-        dims["azure.location"] = LOCATION
+    location = r.get("location") or LOCATION                    # polled records carry their resource's region
+    if location:
+        dims["azure.location"] = re.sub(r"[^a-z0-9]", "", str(location).lower())
     dimension = r.get("dimension")                              # DCR export only; diag settings have no dimensions
     for k, v in (dimension if isinstance(dimension, dict) else {}).items():
         if v not in (None, ""):
@@ -100,6 +103,15 @@ def to_line(raw: dict):
             f'sum={float(r["total"])},count={count:g} {int(ts.timestamp() * 1000)}')
 
 
+NEWLINE = chr(10)
+
+
+def post_lines(lines):
+    for i in range(0, len(lines), 1000):                        # API limit: 1000 lines per request
+        resp = requests.post(DT_URL, headers=HEADERS, data=NEWLINE.join(lines[i:i + 1000]), timeout=30)
+        resp.raise_for_status()                                 # let the trigger retry the batch
+
+
 @app.event_hub_message_trigger(arg_name="events", event_hub_name="%EH_NAME%",
                                connection="EH_CONN", cardinality="many")
 # typing.List, not builtin list[...]: the Python worker rejects the latter (FunctionLoadError)
@@ -110,6 +122,24 @@ def run(events: List[func.EventHubEvent]):
             line = to_line(r)
             if line:
                 lines.append(line)
-    for i in range(0, len(lines), 1000):                        # API limit: 1000 lines per request
-        resp = requests.post(DT_URL, headers=HEADERS, data="\n".join(lines[i:i + 1000]), timeout=30)
-        resp.raise_for_status()                                 # let the trigger retry the batch
+    post_lines(lines)
+
+
+# Alternative to the Event Hub pipeline: poll the Azure Monitor metrics API every minute for the minute that is
+# AZMON_DELAY_MINUTES (default 2) old and forward it. Does nothing unless AZMON_CONFIG is set (see azmon.py).
+# Don't poll resources that are also exported through a DCR / diagnostic setting.
+@app.timer_trigger(schedule="0 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
+def poll(timer: func.TimerRequest) -> None:
+    raw = os.environ.get("AZMON_CONFIG")
+    if not raw:
+        logging.info("AZMON_CONFIG not set; metrics polling is disabled")
+        return
+    start, end = azmon.target_window(delay_minutes=int(os.environ.get("AZMON_DELAY_MINUTES", "2")))
+    lines = []
+    for entry in azmon.load_config(raw):
+        for r in azmon.fetch_records(entry, start, end):
+            line = to_line(r)
+            if line:
+                lines.append(line)
+    logging.info("polled %s: forwarding %d data points", start.strftime("%H:%M"), len(lines))
+    post_lines(lines)

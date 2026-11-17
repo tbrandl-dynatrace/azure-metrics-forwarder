@@ -91,3 +91,82 @@ def load_function(monkeypatch):
         return module.run._function.get_user_function()
 
     return _load
+
+
+class MockAzure:
+    """Local stand-in for ARM (list resources) and the regional Azure Monitor Metrics Batch endpoint."""
+
+    def __init__(self):
+        self.resources = []         # [{"id", "location"}]
+        self.batch_calls = []       # [{"region", "subscription", "params", "resourceids"}]
+        self.arm_calls = 0
+        self.batch_response = lambda call: {"values": []}
+
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send(self, payload, status=200):
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                outer.arm_calls += 1
+                self._send({"value": outer.resources})
+
+            def do_POST(self):
+                from urllib.parse import urlparse, parse_qs
+                u = urlparse(self.path)
+                parts = u.path.strip("/").split("/")                 # <region>/subscriptions/<sub>/metrics:getBatch
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                call = {"region": parts[0], "subscription": parts[2],
+                        "params": {k: v[0] for k, v in parse_qs(u.query).items()}, "resourceids": body["resourceids"],
+                        "auth": self.headers.get("Authorization")}
+                outer.batch_calls.append(call)
+                self._send(outer.batch_response(call))
+
+            def log_message(self, *args):
+                pass
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.server.shutdown()
+
+
+@pytest.fixture
+def azure():
+    mock = MockAzure()
+    yield mock
+    mock.stop()
+
+
+@pytest.fixture
+def load_poller(monkeypatch, azure):
+    """Import function_app / azmon fresh, pointed at the mock Azure and the given Dynatrace URL; returns poll()."""
+
+    def _load(dt_environment, config, location="westeurope", delay=None):
+        monkeypatch.setenv("DT_ENVIRONMENT", dt_environment)
+        monkeypatch.setenv("DT_TOKEN", "test-token")
+        monkeypatch.setenv("AZURE_LOCATION", location)
+        monkeypatch.setenv("AZMON_ARM_URL", azure.url)
+        monkeypatch.setenv("AZMON_METRICS_URL", azure.url + "/{region}")
+        if config is None:
+            monkeypatch.delenv("AZMON_CONFIG", raising=False)
+        else:
+            monkeypatch.setenv("AZMON_CONFIG", json.dumps(config))
+        if delay is not None:
+            monkeypatch.setenv("AZMON_DELAY_MINUTES", str(delay))
+        for m in ("function_app", "azmon"):
+            sys.modules.pop(m, None)
+        azmon = importlib.import_module("azmon")
+        monkeypatch.setattr(azmon, "get_token", lambda scope: "fake-token-for-" + scope.split("/")[2])
+        module = importlib.import_module("function_app")
+        return module.poll._function.get_user_function()
+
+    return _load

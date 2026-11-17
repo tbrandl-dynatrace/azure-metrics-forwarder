@@ -139,9 +139,51 @@ For identity-based access, grant the Function's managed identity **Azure Event H
 - Compare against the existing `cloud.azure.*` metric's dimensions and adjust the `dims` dict in `to_line()` if your tenant uses different attribute names (e.g. `azure.resourceId`).
 - DCR troubleshooting: [DCR monitoring](https://learn.microsoft.com/en-us/azure/azure-monitor/data-collection/data-collection-monitor).
 
+## Alternative: poll the Azure Monitor metrics API (no DCR / diagnostic settings / Event Hub)
+
+The same Function app also contains a second function, `poll` ([function_app.py](function_app.py), helpers in [azmon.py](azmon.py)), triggered by a timer **every minute**. Each run asks the [Azure Monitor Metrics Batch API](https://learn.microsoft.com/en-us/rest/api/monitor/metrics-batch/batch) for the one-minute slot that is **2 minutes old** (`AZMON_DELAY_MINUTES`, default 2, so Azure has had time to finalise it), converts the data points exactly like the Event Hub path does (same metric keys with `.metricstream`, same `azure.*` attributes) and posts them to Dynatrace.
+
+```
+timer (every minute) → ARM: list resources of the type → Metrics Batch API (per region, ≤50 resources/call) → Dynatrace
+```
+
+Unlike the export pipelines it needs no Event Hub and has no setup lag, and it gives you the real region per resource (`azure.location`). It is disabled until `AZMON_CONFIG` is set.
+
+| Setting | Value |
+|---|---|
+| `AZMON_CONFIG` | JSON list, one entry per resource type to poll (below). Unset = polling off. |
+| `AZMON_DELAY_MINUTES` | Optional, default `2` |
+
+```json
+[{"subscription": "<subscription id>",
+  "resourceType": "Microsoft.KeyVault/vaults",
+  "resourceGroup": "optional resource group filter",
+  "metrics": ["ServiceApiHit", "ServiceApiLatency"],
+  "dimensions": ["ActivityName"],
+  "top": 100}]
+```
+
+`dimensions` (optional) splits the metrics by those dimension names (`<dim> eq '*'`); `top` caps the series per metric and resource (default 100). Without `dimensions` values are aggregated across dimensions.
+
+**Azure permissions:** the Function's managed identity needs **Monitoring Reader on each polled subscription** (the batch API requires it at subscription level; having it on the resources alone is not enough). That is a role assignment, so someone with Owner / User Access Administrator has to grant it:
+
+```bash
+az functionapp identity assign -g <rg> -n <function-app>
+az role assignment create --assignee-object-id <principalId> --assignee-principal-type ServicePrincipal \
+  --role "Monitoring Reader" --scope /subscriptions/<subscription id>
+```
+
+Locally (`func start`) the Function uses your `az login` instead, so it works with whatever access you have.
+
+**Notes**
+- Don't poll resources that are also exported through a DCR or diagnostic setting: you'd ingest the same points twice.
+- Metric names are the Azure Monitor metric names (`ServiceApiHit`), as in the exports. Namespaces other than the resource type (custom / guest metrics) aren't supported by the batch API.
+- The resource list is cached for 10 minutes, so new resources show up with that delay. A run that fails (Azure throttling, Dynatrace outage) loses that minute; there is no replay as with Event Hubs.
+- Large estates: each run makes one batch call per (region, 50 resources) and metric set; the API is throttled, so keep `metrics` lists and resource types focused. The timer runs sequentially and has to finish within the minute.
+
 ## Testing
 
-[tests/test_e2e.py](tests/test_e2e.py) runs the Function handler the way the Functions host does (a batch of Event Hub events) and checks the real HTTP requests it sends to a local mock of the Dynatrace ingest API. It uses the example payloads from the Microsoft docs for both export methods and covers attributes and metric keys, DCR/diagnostic-settings parity, ignoring log records, 1,000-line batching, escaping, and error propagation (so Event Hubs retries).
+[tests/test_poller.py](tests/test_poller.py) does the same for the polling function against a mock of ARM and the Metrics Batch API (batching, regions, dimensions, error handling, the 2-minute window). [tests/test_e2e.py](tests/test_e2e.py) runs the Function handler the way the Functions host does (a batch of Event Hub events) and checks the real HTTP requests it sends to a local mock of the Dynatrace ingest API. It uses the example payloads from the Microsoft docs for both export methods and covers attributes and metric keys, DCR/diagnostic-settings parity, ignoring log records, 1,000-line batching, escaping, and error propagation (so Event Hubs retries).
 
 ```bash
 pip install -r requirements-dev.txt
