@@ -3,7 +3,7 @@
 It runs the same `poll` handler as the deployed timer function, once at the start of every minute, with your own
 `az login` (DefaultAzureCredential). Stop with Ctrl-C.
 
-  python scripts/poll_local.py                              # resources tagged dynatrace-metrics, all your subscriptions
+  python scripts/poll_local.py                              # resources tagged dynatrace-nearrealtime, all your subscriptions
   python scripts/poll_local.py --tag demo --subscriptions <id>[,<id>]
   python scripts/poll_local.py --once                       # a single poll, then exit
 
@@ -28,7 +28,7 @@ def load_env_local():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tag", default=os.environ.get("AZMON_TAG", "dynatrace-metrics"), help="tag name that selects resources")
+    ap.add_argument("--tag", default=os.environ.get("AZMON_TAG", "dynatrace-nearrealtime"), help="tag name that selects resources")
     ap.add_argument("--subscriptions", help="comma-separated subscription ids (default: all you can read)")
     ap.add_argument("--delay-minutes", help="how old the polled minute is (default 2)")
     ap.add_argument("--once", action="store_true", help="poll once and exit")

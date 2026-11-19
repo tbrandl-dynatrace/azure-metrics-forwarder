@@ -161,7 +161,7 @@ def main():
     threading.Thread(target=generate, daemon=True).start()
 
     if a.run_poller:
-        os.environ.setdefault("AZMON_TAG", "dynatrace-metrics")      # discovery by tag, like a real deployment
+        os.environ.setdefault("AZMON_TAG", "dynatrace-nearrealtime")      # discovery by tag, like a real deployment
         os.environ["AZMON_SUBSCRIPTIONS"] = sub
         import function_app
         poll = function_app.poll._function.get_user_function()

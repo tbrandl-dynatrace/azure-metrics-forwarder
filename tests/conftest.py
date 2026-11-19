@@ -140,7 +140,7 @@ def azure():
 def load_poller(monkeypatch, azure):
     """Import function_app / azmon fresh, pointed at the mock Azure and the given Dynatrace URL; returns poll()."""
 
-    def _load(dt_environment, tag="dynatrace-metrics", delay=None, subscriptions=None):
+    def _load(dt_environment, tag="dynatrace-nearrealtime", delay=None, subscriptions=None):
         monkeypatch.setenv("DT_ENVIRONMENT", dt_environment)
         monkeypatch.setenv("DT_TOKEN", "test-token")
         monkeypatch.setenv("AZMON_ARM_URL", azure.url)

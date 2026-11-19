@@ -189,9 +189,10 @@ def test_discovery_and_definitions_are_cached_between_polls(dynatrace, vaults, l
     assert len(vaults.batch_calls) == 4                               # 2 dimension groups x 2 polls
 
 
-def test_polling_is_disabled_without_a_tag(dynatrace, azure, load_poller):
+def test_default_tag_is_dynatrace_nearrealtime(dynatrace, azure, load_poller):
     load_poller(dynatrace.url, tag=None)(None)
-    assert azure.graph_calls == [] and azure.batch_calls == [] and dynatrace.requests == []
+    (graph,) = azure.graph_calls
+    assert "tags['dynatrace-nearrealtime']" in graph["query"]
 
 
 def test_custom_delay(dynatrace, vaults, load_poller):

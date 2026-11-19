@@ -29,7 +29,7 @@ def test_tagged_resources_are_found_and_all_usable_metrics_are_polled(dynatrace,
 
     # one Resource Graph query that selects by that tag, across all subscriptions
     (graph,) = tagged.graph_calls
-    assert "tags['dynatrace-metrics']" in graph["query"] and "!in" in graph["query"]
+    assert "tags['dynatrace-nearrealtime']" in graph["query"] and "!in" in graph["query"]
     assert "subscriptions" not in graph
 
     # per resource type: every per-minute metric that can be requested

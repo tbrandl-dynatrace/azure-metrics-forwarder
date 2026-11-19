@@ -7,6 +7,7 @@ app = func.FunctionApp()
 DT_URL = os.environ["DT_ENVIRONMENT"].rstrip("/") + "/api/v2/metrics/ingest"
 HEADERS = {"Authorization": f"Api-Token {os.environ['DT_TOKEN']}",
            "Content-Type": "text/plain; charset=utf-8"}
+DEFAULT_TAG = "dynatrace-nearrealtime"
 KEY_SUFFIX = os.environ.get("METRIC_KEY_SUFFIX", ".nearrealtime")   # appended to every metric key; keeps these series apart from the native metrics
 
 RID = re.compile(r"^/subscriptions/(?P<sub>[^/]+)/resourcegroups/(?P<rg>[^/]+)/providers/(?P<ns>[^/]+)/(?P<rest>.+)$", re.I)
@@ -113,13 +114,10 @@ def post_lines(lines):
 
 
 # Poll the Azure Monitor metrics API every minute for the minute that is AZMON_DELAY_MINUTES (default 2) old and
-# forward it. Does nothing unless AZMON_TAG is set (see azmon.py).
+# forward it. Resources are selected by the tag AZMON_TAG (default "dynatrace-nearrealtime", see azmon.py).
 @app.timer_trigger(schedule="0 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def poll(timer: func.TimerRequest) -> None:
-    tag = os.environ.get("AZMON_TAG")
-    if not tag:
-        logging.info("AZMON_TAG is not set; metrics polling is disabled")
-        return
+    tag = os.environ.get("AZMON_TAG") or DEFAULT_TAG
     start, end = azmon.target_window(delay_minutes=int(os.environ.get("AZMON_DELAY_MINUTES", "2")))
     subscriptions = [s.strip() for s in os.environ.get("AZMON_SUBSCRIPTIONS", "").split(",") if s.strip()] or None
     split = os.environ.get("AZMON_DIMENSIONS", "all").strip().lower() not in ("none", "off", "false", "no", "0")

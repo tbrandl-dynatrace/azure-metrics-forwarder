@@ -1,7 +1,7 @@
 """Pull platform metrics from Azure Monitor (Metrics Batch API) and shape them as flat records that
 function_app.to_line() turns into Dynatrace line protocol.
 
-What to poll is decided by an Azure tag (AZMON_TAG, e.g. "dynatrace-metrics"): every resource that carries it, of any
+What to poll is decided by an Azure tag (AZMON_TAG, e.g. "dynatrace-nearrealtime"): every resource that carries it, of any
 resource type, in any resource group, is polled. Resources are found with Azure Resource Graph in all subscriptions the
 identity can read, or only in AZMON_SUBSCRIPTIONS (comma-separated, any number). All per-minute metrics of the
 resource type are collected, split by ALL of their dimensions (from the metric definitions); AZMON_DIMENSIONS=none

@@ -2,7 +2,7 @@
 # Real end-to-end test of the poller, deployed as an Azure Function:
 #   Key Vault traffic → Azure Monitor → timer-triggered Function (every minute) → Dynatrace → DQL check.
 #
-# `up` creates a throw-away resource group with a Key Vault tagged dynatrace-metrics=true and a Function App
+# `up` creates a throw-away resource group with a Key Vault tagged dynatrace-nearrealtime=true and a Function App
 # (Flex Consumption) running this repo's `poll` function with a managed identity. The identity needs
 # Monitoring Reader on the subscription (a role assignment: Owner / User Access Administrator); if you may not
 # create role assignments `up` prints the command for an admin, and you can run the poller on your machine
@@ -16,7 +16,7 @@
 #                                    # continuous traffic + per-minute latency report (Azure Monitor and Dynatrace)
 #   ./scripts/e2e-poller.sh role     # (re)try the Monitoring Reader assignment, e.g. after an admin allowed it
 #   ./scripts/e2e-poller.sh logs     # stream the deployed Function's log
-#   ./scripts/e2e-poller.sh tag      # tag a vault created before tag support (dynatrace-metrics=true)
+#   ./scripts/e2e-poller.sh tag      # tag a vault created before tag support (dynatrace-nearrealtime=true)
 #   ./scripts/e2e-poller.sh down     # delete everything
 #   ./scripts/e2e-poller.sh all      # up + run + down
 #
@@ -98,7 +98,7 @@ up() {
 
   log "Resource group + Key Vault ($RG, $LOCATION)"
   az group create -n "$RG" -l "$LOCATION" -o none
-  az keyvault create -g "$RG" -n "$KV" -l "$LOCATION" --enable-rbac-authorization false --tags dynatrace-metrics=true -o none
+  az keyvault create -g "$RG" -n "$KV" -l "$LOCATION" --enable-rbac-authorization false --tags dynatrace-nearrealtime=true -o none
 
   log "Function app (Flex Consumption) with managed identity"
   az storage account create -g "$RG" -n "$ST" -l "$LOCATION" --sku Standard_LRS -o none
@@ -106,7 +106,7 @@ up() {
   PRINCIPAL="$(az functionapp identity assign -g "$RG" -n "$FUNC" --query principalId -o tsv)"
   save_state
   # test only: for real deployments keep the token in Key Vault and use a Key Vault reference
-  az functionapp config appsettings set -g "$RG" -n "$FUNC" -o none --settings     "DT_ENVIRONMENT=$DT_ENVIRONMENT" "DT_TOKEN=$DT_TOKEN" "AZURE_LOCATION=$LOCATION"     "AZMON_TAG=dynatrace-metrics" "AZMON_SUBSCRIPTIONS=$SUB" "AZMON_DELAY_MINUTES=${AZMON_DELAY_MINUTES:-2}"
+  az functionapp config appsettings set -g "$RG" -n "$FUNC" -o none --settings     "DT_ENVIRONMENT=$DT_ENVIRONMENT" "DT_TOKEN=$DT_TOKEN" "AZURE_LOCATION=$LOCATION"     "AZMON_TAG=dynatrace-nearrealtime" "AZMON_SUBSCRIPTIONS=$SUB" "AZMON_DELAY_MINUTES=${AZMON_DELAY_MINUTES:-2}"
 
   log "Deploying the Function code"
   (cd "$ROOT" && func azure functionapp publish "$FUNC" --python)
@@ -182,8 +182,8 @@ latency() {   # continuous traffic; reports how long each minute takes to appear
 
 tag() {   # (re)apply the discovery tag to the test vault, e.g. for a vault created before tag support
   load_state
-  az tag update --resource-id "$(az keyvault show -n "$KV" --query id -o tsv)" --operation merge --tags dynatrace-metrics=true -o none
-  echo "tagged $KV with dynatrace-metrics=true (Resource Graph needs a few minutes to see it)"
+  az tag update --resource-id "$(az keyvault show -n "$KV" --query id -o tsv)" --operation merge --tags dynatrace-nearrealtime=true -o none
+  echo "tagged $KV with dynatrace-nearrealtime=true (Resource Graph needs a few minutes to see it)"
 }
 
 down() {
