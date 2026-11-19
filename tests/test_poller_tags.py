@@ -201,3 +201,14 @@ def test_event_hub_function_is_only_registered_with_a_hub_name(dynatrace, load_p
     monkeypatch.setenv("EH_NAME", "metrics")
     sys.modules.pop("function_app")
     assert hasattr(importlib.import_module("function_app"), "run")
+
+
+def test_count_aggregated_metrics_are_counters_sending_the_sample_count(dynatrace, azure, load_poller):
+    azure.resources = [{"id": f"{KV}/vault-a", "location": "westeurope"}]
+    azure.definitions = {"microsoft.keyvault/vaults": [definition("ServiceApiHit", agg="Count")]}
+    azure.batch_response = answer_with_every_requested_metric
+    poll = load_poller(dynatrace.url, CONFIG)
+    poll(None)
+    (line,) = [l for l in dynatrace.lines if "ServiceApiHit" in l]
+    assert " count,delta=" in line and "gauge" not in line
+    assert COUNTER.match(line)["delta"] == str(float(POINT["count"]))

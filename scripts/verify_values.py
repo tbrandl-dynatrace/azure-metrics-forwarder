@@ -1,7 +1,7 @@
 """Compare what the poller put into Dynatrace with what Azure Monitor itself reports for the test Key Vault.
 
 Covers both metric kinds against real data:
-  counter  ServiceApiHit      (Azure primary aggregation Total)   -> Dynatrace counter: sum per minute == Azure total
+  counter  ServiceApiHit      (Azure primary aggregation Count)   -> Dynatrace counter: sum per minute == Azure total
   gauge    ServiceApiLatency  (Azure primary aggregation Average) -> Dynatrace gauge:   min / max / avg == Azure min / max / average
 
   python scripts/verify_values.py <subscription> <resource group> <vault name>
@@ -62,12 +62,12 @@ def compare(dt_slots, az_slots, now):
         if not hit or not lat or (hit.get("count") or 0) <= 0 or (lat.get("count") or 0) <= 0:
             continue
         problems = []
-        if not close(d["c"], hit["total"], 1e-9):
-            problems.append(f"counter sum {d['c']} != Azure total {hit['total']}")
+        if not close(d["c"], hit["count"], 1e-9):
+            problems.append(f"counter sum {d['c']} != Azure count {hit['count']}")
         for key, azkey in (("mn", "minimum"), ("mx", "maximum"), ("a", "average")):
             if not close(d[key], lat[azkey]):
                 problems.append(f"gauge {key} {d[key]} != Azure {azkey} {lat[azkey]}")
-        rows.append((slot, f"{COUNTER_METRIC} {d['c']:g} (Azure {hit['total']:g}) | {GAUGE_METRIC} avg {d['a']:.4g} (Azure {lat['average']:.4g})"
+        rows.append((slot, f"{COUNTER_METRIC} {d['c']:g} (Azure {hit['count']:g}) | {GAUGE_METRIC} avg {d['a']:.4g} (Azure {lat['average']:.4g})"
                            + ("   MISMATCH: " + "; ".join(problems) if problems else "   ok")))
         bad += [(slot, p) for p in problems]
     return rows, bad
@@ -81,7 +81,7 @@ def main():
 
     kinds = azmon.metric_kinds(f"/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults/{vault}",
                                "Microsoft.KeyVault/vaults")
-    expected = {COUNTER_METRIC.lower(): "count", GAUGE_METRIC.lower(): "gauge"}
+    expected = {COUNTER_METRIC.lower(): "samples", GAUGE_METRIC.lower(): "gauge"}
     wrong = {k: kinds.get(k) for k, v in expected.items() if kinds.get(k) != v}
     if wrong:
         print(f"unexpected Azure metric kinds (wanted {expected}): {wrong}")

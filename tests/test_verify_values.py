@@ -15,7 +15,7 @@ def at(m):
 
 def azure(slot, hits=100.0, avg=12.5, mn=3.0, mx=40.0):
     iso = slot.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return {"ServiceApiHit": {"metricName": "ServiceApiHit", "time": iso, "count": 100, "total": hits, "minimum": 1, "maximum": 1, "average": 1},
+    return {"ServiceApiHit": {"metricName": "ServiceApiHit", "time": iso, "count": hits, "total": hits, "minimum": 1, "maximum": 1, "average": 1},
             "ServiceApiLatency": {"metricName": "ServiceApiLatency", "time": iso, "count": 100, "total": avg * 100, "minimum": mn, "maximum": mx, "average": avg}}
 
 
@@ -37,7 +37,7 @@ def test_matching_counter_and_gauge_values_pass():
 
 def test_counter_mismatch_is_reported():
     rows, bad = vv.compare({at(1): dyn(hits=2.0)}, {at(1): azure(at(1), hits=100.0)}, NOW)
-    assert [p for _, p in bad] == ["counter sum 2.0 != Azure total 100.0"]
+    assert [p for _, p in bad] == ["counter sum 2.0 != Azure count 100.0"]
 
 
 def test_gauge_mismatch_is_reported():

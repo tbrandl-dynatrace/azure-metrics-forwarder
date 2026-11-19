@@ -42,6 +42,19 @@ Both functions convert each metric record to Dynatrace line protocol and post it
 
 4. **Tag the resources** you want in Dynatrace: `az tag update --resource-id <id> --operation merge --tags dynatrace-metrics=true`. Details below.
 
+## Run the poller locally (demos)
+
+[scripts/poll_local.py](scripts/poll_local.py) runs the same `poll` handler on your machine at the start of every minute and sends the metrics into Dynatrace until you press Ctrl-C. It uses your `az login` (Reader, plus Monitoring Reader on the subscription), so no deployment or role assignment for a managed identity is needed. `DT_ENVIRONMENT` / `DT_TOKEN` come from the environment or `.env.local`.
+
+```bash
+pip install -r requirements.txt                 # once (a venv is a good idea)
+az login
+python scripts/poll_local.py                    # resources tagged dynatrace-metrics, every subscription you can read
+python scripts/poll_local.py --tag demo --subscriptions <id>   # other tag / only one subscription
+```
+
+Stop the deployed Function (or don't tag the same resources) while you do this, otherwise counters are sent twice.
+
 ## How the poller works
 
 The `poll` function ([function_app.py](function_app.py), helpers in [azmon.py](azmon.py)), triggered by a timer **every minute**. Each run asks the [Azure Monitor Metrics Batch API](https://learn.microsoft.com/en-us/rest/api/monitor/metrics-batch/batch) for the one-minute slot that is **2 minutes old** (`AZMON_DELAY_MINUTES`, default 2, so Azure has had time to finalise it), converts the data points exactly like the Event Hub path does (same metric keys with `.metricstream`, same `azure.*` attributes) and posts them to Dynatrace.
@@ -109,7 +122,7 @@ az role assignment create --assignee-object-id <principalId> --assignee-principa
 Finding tagged resources only needs *Reader* (Azure Resource Graph). Locally (`func start`) the Function uses your `az login` instead, so it works with whatever access you have.
 
 **Notes**
-- **Counters vs gauges:** the poller reads each metric's definition from Azure. Metrics Azure aggregates as a **Total** per minute (hits, transactions, bytes in/out, ... e.g. Key Vault `ServiceApiHit`) are counters and are sent as Dynatrace counters, `count,delta=<total of that minute>`; everything else (percentages, latencies, sizes, averages) is sent as a gauge summary (`gauge,min,max,sum,count`). So `ServiceApiHit` with 100 calls in a minute is a delta of 100 for that minute (sum 100 over a 1m interval); divide by 60 for a per-second rate. The exports (DCR / diagnostic settings) don't carry the metric definition, so they always send gauge summaries: don't feed the same metric key from both the poller and an export, Dynatrace would see a gauge and a counter under one key.
+- **Counters vs gauges:** the poller reads each metric's definition from Azure. Metrics whose primary aggregation in Azure is **Total** (transactions, bytes in/out, ...) or **Count** (e.g. Key Vault `ServiceApiHit`, where every event is one sample) are counters and are sent as Dynatrace counters, `count,delta=<total of that minute>`; everything else (percentages, latencies, sizes, averages) is sent as a gauge summary (`gauge,min,max,sum,count`). So `ServiceApiHit` with 100 calls in a minute is a delta of 100 for that minute (sum 100 over a 1m interval); divide by 60 for a per-second rate. The exports (DCR / diagnostic settings) don't carry the metric definition, so they always send gauge summaries: don't feed the same metric key from both the poller and an export, Dynatrace would see a gauge and a counter under one key.
 - Don't poll resources that are also exported through a DCR or diagnostic setting: you'd ingest the same points twice.
 - Metric names are the Azure Monitor metric names (`ServiceApiHit`), as in the exports. Namespaces other than the resource type (custom / guest metrics) aren't supported by the batch API. A metric Azure rejects for a resource is logged once and skipped.
 - The resource list is cached for 10 minutes, so new resources show up with that delay. A run that fails (Azure throttling, Dynatrace outage) loses that minute; there is no replay as with Event Hubs.

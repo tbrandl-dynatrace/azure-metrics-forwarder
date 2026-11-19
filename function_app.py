@@ -99,9 +99,11 @@ def to_line(raw: dict):
     ts = dt.datetime.strptime(r["time"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc)
     dim_s = ",".join(f'{dim_key(k)}="{esc(v)}"' for k, v in dims.items())
     key = f'{metric_key(p, r["metricname"])},{dim_s}'
-    if r.get("kind") == "count":
-        # Azure aggregates this metric as a Total per minute, i.e. a counter: send the minute's increase as a counter delta
-        return f'{key} count,delta={float(r["total"])} {int(ts.timestamp() * 1000)}'
+    if r.get("kind") in ("count", "samples"):
+        # Azure aggregates this metric as a Total (or counts its samples) per minute, i.e. a counter: send the minute's
+        # increase as a counter delta
+        delta = float(r["total"]) if r["kind"] == "count" else count
+        return f'{key} count,delta={delta} {int(ts.timestamp() * 1000)}'
     total = float(r["total"])
     if count != int(count):
         # Dynatrace needs an integer sample count; some metrics (e.g. SaturationShoebox) report fractional ones.

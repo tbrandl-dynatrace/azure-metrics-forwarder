@@ -153,8 +153,10 @@ def discover_tagged(tag, subscriptions=None):
 def metric_definitions(resource_id, resource_type):
     """Metric definitions of a resource type (cached): [{"name", "kind", "usable"}].
     usable: per-minute grain available and no dimension filter required.
-    kind:   "count" for metrics Azure aggregates as a Total (hits, bytes, transactions ... summed per minute, i.e. counters),
-            "gauge" for everything else (Average / Minimum / Maximum / Count primary aggregation: percentages, latencies, sizes)."""
+    kind:   "count" for metrics Azure aggregates as a Total (bytes, transactions ... summed per minute, i.e. counters),
+            "samples" for metrics whose primary aggregation is Count (e.g. Key Vault ServiceApiHit: every event is a
+            sample, the number of samples per minute is the counter),
+            "gauge" for everything else (Average / Minimum / Maximum: percentages, latencies, sizes)."""
     key = resource_type.lower()
     hit = _definition_cache.get(key)
     if hit and time.time() - hit[0] < DEFINITION_CACHE_SECONDS:
@@ -168,7 +170,7 @@ def metric_definitions(resource_id, resource_type):
             continue
         grains = [a.get("timeGrain") for a in d.get("metricAvailabilities") or []]
         defs.append({"name": name,
-                     "kind": "count" if str(d.get("primaryAggregationType", "")).lower() == "total" else "gauge",
+                     "kind": {"total": "count", "count": "samples"}.get(str(d.get("primaryAggregationType", "")).lower(), "gauge"),
                      "usable": not d.get("isDimensionRequired") and (not grains or "PT1M" in grains)})
     _definition_cache[key] = (time.time(), defs)
     return defs
