@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 SLOT = dt.timedelta(minutes=1)
 OBSERVE_EVERY_S = 15
 METRIC = "ServiceApiHit"
-DT_KEY = "cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.metricstream"
+DT_KEY = "cloud.azure.microsoft_keyvault.vaults.ServiceApiHit" + os.environ.get("METRIC_KEY_SUFFIX", ".nearrealtime")
 
 
 def utcnow():

@@ -25,6 +25,8 @@
 # Reader yet (the deployed poller then reads nothing, so nothing is ingested twice). With a working deployed poller
 # it would send the same minutes a second time, which doubles the counter deltas.
 #
+# AZMON_DELAY_MINUTES=1 ./scripts/e2e-poller.sh up   sets how old the polled minute is (default 2) on the deployed Function.
+#
 # DT_ENVIRONMENT / DT_TOKEN come from the environment or the git-ignored .env.local (see .env.example).
 # Needs: az CLI (logged in; Contributor), Azure Functions Core Tools (func), python3 with venv.
 # Not yet run by its author; adjust az flags if your CLI version differs.
@@ -104,7 +106,7 @@ up() {
   PRINCIPAL="$(az functionapp identity assign -g "$RG" -n "$FUNC" --query principalId -o tsv)"
   save_state
   # test only: for real deployments keep the token in Key Vault and use a Key Vault reference
-  az functionapp config appsettings set -g "$RG" -n "$FUNC" -o none --settings     "DT_ENVIRONMENT=$DT_ENVIRONMENT" "DT_TOKEN=$DT_TOKEN" "AZURE_LOCATION=$LOCATION"     "AZMON_TAG=dynatrace-metrics" "AZMON_SUBSCRIPTIONS=$SUB"
+  az functionapp config appsettings set -g "$RG" -n "$FUNC" -o none --settings     "DT_ENVIRONMENT=$DT_ENVIRONMENT" "DT_TOKEN=$DT_TOKEN" "AZURE_LOCATION=$LOCATION"     "AZMON_TAG=dynatrace-metrics" "AZMON_SUBSCRIPTIONS=$SUB" "AZMON_DELAY_MINUTES=${AZMON_DELAY_MINUTES:-2}"
 
   log "Deploying the Function code"
   (cd "$ROOT" && func azure functionapp publish "$FUNC" --python)

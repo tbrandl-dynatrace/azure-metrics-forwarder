@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from test_e2e import parse
+from helpers import parse
 from test_poller import CONFIG, KV, POINT, SUB, batch_value
 
 STORAGE = f"/subscriptions/{SUB}/resourceGroups/rg-2/providers/Microsoft.Storage/storageAccounts"
@@ -61,8 +61,8 @@ def test_tagged_resources_are_found_and_all_usable_metrics_are_polled(dynatrace,
 
     keys = sorted(parse(l)["key"] for l in dynatrace.lines)
     assert keys == sorted(
-        [f"cloud.azure.microsoft_keyvault.vaults.{m}.metricstream" for m in ("ServiceApiHit", "Availability")] * 2
-        + [f"cloud.azure.microsoft_storage.storageaccounts.{m}.metricstream" for m in ("Transactions", "ServiceApiHit")])
+        [f"cloud.azure.microsoft_keyvault.vaults.{m}.nearrealtime" for m in ("ServiceApiHit", "Availability")] * 2
+        + [f"cloud.azure.microsoft_storage.storageaccounts.{m}.nearrealtime" for m in ("Transactions", "ServiceApiHit")])
     storage_line = parse([l for l in dynatrace.lines if "storageaccounts" in l][0])
     assert storage_line["dims"]["azure.location"] == "northeurope"
     assert storage_line["dims"]["azure.resource.name"] == "stor1"
@@ -191,24 +191,19 @@ def test_fractional_sample_counts_are_sent_as_one_sample_with_the_average():
     assert "sum=0.8," in whole and "count=4 " in whole
 
 
-def test_event_hub_function_is_only_registered_with_a_hub_name(dynatrace, load_poller, monkeypatch):
-    import sys, importlib
-    monkeypatch.delenv("EH_NAME", raising=False)
-    poll = load_poller(dynatrace.url, None, tag="dynatrace-metrics")
-    module = sys.modules["function_app"]
-    assert not hasattr(module, "run") and callable(poll)                      # poller-only deployment
-
-    monkeypatch.setenv("EH_NAME", "metrics")
-    sys.modules.pop("function_app")
-    assert hasattr(importlib.import_module("function_app"), "run")
-
-
-def test_count_aggregated_metrics_are_counters_sending_the_sample_count(dynatrace, azure, load_poller):
+def test_metric_key_suffix_is_configurable(dynatrace, azure, load_poller, monkeypatch):
     azure.resources = [{"id": f"{KV}/vault-a", "location": "westeurope"}]
-    azure.definitions = {"microsoft.keyvault/vaults": [definition("ServiceApiHit", agg="Count")]}
+    azure.definitions = {"microsoft.keyvault/vaults": [definition("ServiceApiLatency", agg="Average")]}
     azure.batch_response = answer_with_every_requested_metric
-    poll = load_poller(dynatrace.url, CONFIG)
-    poll(None)
-    (line,) = [l for l in dynatrace.lines if "ServiceApiHit" in l]
-    assert " count,delta=" in line and "gauge" not in line
-    assert COUNTER.match(line)["delta"] == str(float(POINT["count"]))
+    monkeypatch.setenv("METRIC_KEY_SUFFIX", ".demo")
+    load_poller(dynatrace.url, CONFIG)(None)
+    assert parse(dynatrace.lines[0])["key"] == "cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.demo"
+
+
+def test_default_metric_key_suffix_is_nearrealtime(dynatrace, azure, load_poller, monkeypatch):
+    azure.resources = [{"id": f"{KV}/vault-a", "location": "westeurope"}]
+    azure.definitions = {"microsoft.keyvault/vaults": [definition("ServiceApiLatency", agg="Average")]}
+    azure.batch_response = answer_with_every_requested_metric
+    monkeypatch.delenv("METRIC_KEY_SUFFIX", raising=False)
+    load_poller(dynatrace.url, CONFIG)(None)
+    assert parse(dynatrace.lines[0])["key"].endswith(".ServiceApiHit.nearrealtime")

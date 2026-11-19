@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 COUNTER_METRIC, GAUGE_METRIC = "ServiceApiHit", "ServiceApiLatency"
 PREFIX = "cloud.azure.microsoft_keyvault.vaults."
-SUFFIX = ".metricstream"
+SUFFIX = os.environ.get("METRIC_KEY_SUFFIX", ".nearrealtime")
 MIN_SLOTS = 3
 SETTLE = dt.timedelta(minutes=5)       # Azure may still revise the newest minutes; only compare older ones
 REL_TOL = 1e-3

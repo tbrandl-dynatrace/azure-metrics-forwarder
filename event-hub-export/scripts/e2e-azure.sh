@@ -9,15 +9,15 @@
 # generates Key Vault traffic, then polls Dynatrace until the metrics from BOTH vaults have arrived.
 #
 # Usage:
-#   cp .env.example .env.local   # git-ignored; set DT_ENVIRONMENT (classic API URL) and DT_TOKEN
+#   cp ../.env.example ../.env.local   # git-ignored; set DT_ENVIRONMENT (classic API URL) and DT_TOKEN
 #                                # (one token with metrics.ingest + storage:metrics:read) - or export them
 #   az login && az account set --subscription <id>
-#   ./scripts/e2e-azure.sh up        # provision + deploy (~10 min)
-#   ./scripts/e2e-azure.sh verify    # generate traffic and wait for data in Dynatrace (typically 10–40 min,
+#   ./event-hub-export/scripts/e2e-azure.sh up        # provision + deploy (~10 min)
+#   ./event-hub-export/scripts/e2e-azure.sh verify    # generate traffic and wait for data in Dynatrace (typically 10–40 min,
 #                                    # a new diagnostic setting can take up to 90 min)
-#   ./scripts/e2e-azure.sh dcr       # (re)try only the DCR export, e.g. after an admin granted the role
-#   ./scripts/e2e-azure.sh down      # delete everything
-#   ./scripts/e2e-azure.sh all       # up + verify + down
+#   ./event-hub-export/scripts/e2e-azure.sh dcr       # (re)try only the DCR export, e.g. after an admin granted the role
+#   ./event-hub-export/scripts/e2e-azure.sh down      # delete everything
+#   ./event-hub-export/scripts/e2e-azure.sh all       # up + verify + down
 #
 # Needs: az CLI (logged in; Contributor is enough for everything except the DCR export, which needs a role
 #        assignment (Owner / User Access Administrator) - without it the script tests diagnostic settings only),
@@ -28,16 +28,17 @@
 set -euo pipefail
 export MSYS_NO_PATHCONV=1          # Git Bash on Windows would otherwise rewrite /subscriptions/... arguments
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"      # event-hub-export/
+REPO="$(cd "$ROOT/.." && pwd)"                                  # repository root: shared .env.local and scripts/dql.py
 STATE="$ROOT/.e2e-state.env"
 
 # DT_ENVIRONMENT / DT_TOKEN: taken from the environment, else from the git-ignored .env.local (see .env.example)
-if [ -f "$ROOT/.env.local" ]; then
+if [ -f "$REPO/.env.local" ]; then
   while IFS='=' read -r k v; do
     v="${v%$'\r'}"; k="${k//[[:space:]]/}"
     case "$k" in ''|\#*) continue ;; esac
     [ -n "$v" ] && [ -z "${!k:-}" ] && export "$k=$v"
-  done < "$ROOT/.env.local"
+  done < "$REPO/.env.local"
 fi
 
 LOCATION="${LOCATION:-westeurope}"          # everything must be in one region (DCR / diagnostic setting requirement)
@@ -92,7 +93,7 @@ Owner / User Access Administrator to run:
   az role assignment create --assignee-object-id $UAMI_PRINCIPAL --assignee-principal-type ServicePrincipal \\
     --role "Azure Event Hubs Data Sender" --scope $NS_ID
 
-and then run:  ./scripts/e2e-azure.sh dcr
+and then run:  ./event-hub-export/scripts/e2e-azure.sh dcr
 
 MSG
     return 1
@@ -188,12 +189,12 @@ up() {
 
 
   # needs a role assignment; on any failure the script continues with diagnostic settings only
-  setup_dcr || { DCR_ENABLED=0; save_state; echo "DCR export not set up (see above); continuing without it. Retry later with: ./scripts/e2e-azure.sh dcr"; }
+  setup_dcr || { DCR_ENABLED=0; save_state; echo "DCR export not set up (see above); continuing without it. Retry later with: ./event-hub-export/scripts/e2e-azure.sh dcr"; }
 
   save_state
   log "Waiting 60 s for role assignments to propagate"
   sleep 60
-  echo "Provisioned. State saved in $STATE. Next: ./scripts/e2e-azure.sh verify"
+  echo "Provisioned. State saved in $STATE. Next: ./event-hub-export/scripts/e2e-azure.sh verify"
 }
 
 # --------------------------------------------------------------------------------------------------------------
@@ -207,7 +208,7 @@ generate_traffic() {   # Key Vault API hits produce ServiceApiHit / ServiceApiLa
 }
 
 query_dynatrace() {    # prints the resource ids (lower-case) that currently have data for the probe metric (DQL API)
-  "$PY" "$ROOT/scripts/dql.py" --field "azure.resource.id" \
+  "$PY" "$REPO/scripts/dql.py" --field "azure.resource.id" \
     "timeseries s = sum(\`cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.metricstream\`), by:{azure.resource.id}, filter: azure.resource.group == \"${RG,,}\", from: now()-3h | fieldsAdd total = arraySum(s) | filter total > 0 | fields azure.resource.id"
 }
 

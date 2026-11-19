@@ -4,7 +4,7 @@ The Function is invoked exactly as the Azure Functions host would (a list of eve
 calls are received by a local server that mimics POST /api/v2/metrics/ingest. Payloads are the examples
 from the Microsoft docs for both export methods.
 
-Put DT_ENVIRONMENT + DT_TOKEN (scopes: metrics.ingest, storage:metrics:read) in the git-ignored .env.local (see .env.example), or export
+Put DT_ENVIRONMENT + DT_TOKEN (scopes: metrics.ingest, storage:metrics:read) in the git-ignored .env.local (see ../.env.example), or export
 them, to also run the live test against a real Dynatrace tenant.
 """
 import os, re, time, datetime as dt
@@ -12,10 +12,10 @@ import os, re, time, datetime as dt
 import pytest
 import requests
 
-from conftest import FakeEvent, ROOT
+from conftest import FakeEvent, REPO
 
 import sys
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(REPO, "scripts"))
 import dql
 
 # --- sample payloads (from the Microsoft Learn docs) ---------------------------------------------------------

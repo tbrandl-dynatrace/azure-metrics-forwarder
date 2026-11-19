@@ -7,7 +7,7 @@ import datetime as dt
 import pytest
 import requests
 
-from test_e2e import parse
+from helpers import parse
 
 SUB = "a0a0a0a0-bbbb-cccc-dddd-e1e1e1e1e1e1"
 KV = f"/subscriptions/{SUB}/resourceGroups/rg-1/providers/Microsoft.KeyVault/vaults"
@@ -66,7 +66,7 @@ def test_poll_forwards_metrics_to_dynatrace(dynatrace, azure, load_poller):
     # both vaults arrive in Dynatrace with the suffix and semantic attributes
     assert len(dynatrace.lines) == 2
     p = parse(dynatrace.lines[0])
-    assert p["key"] == "cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.metricstream"
+    assert p["key"] == "cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.nearrealtime"
     assert (p["min"], p["max"], p["sum"], p["count"]) == ("2.0", "4.0", "6.0", "2")
     assert p["dims"]["azure.resource.id"] == f"{KV}/vault-a".lower()
     assert p["dims"]["azure.resource.name"] == "vault-a"

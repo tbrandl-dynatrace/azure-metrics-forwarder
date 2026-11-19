@@ -23,16 +23,6 @@ def _load_env_local():
 _load_env_local()
 
 
-class FakeEvent:
-    """Stands in for func.EventHubEvent: the Function only calls get_body()."""
-
-    def __init__(self, body):
-        self._body = json.dumps(body).encode()
-
-    def get_body(self):
-        return self._body
-
-
 class MockDynatrace:
     """Local HTTP server that behaves like POST /api/v2/metrics/ingest and records what it receives."""
 
@@ -74,24 +64,6 @@ def dynatrace():
     mock = MockDynatrace()
     yield mock
     mock.stop()
-
-
-@pytest.fixture
-def load_function(monkeypatch):
-    """Import function_app fresh with the given environment (it reads its config at import time)
-    and return the plain handler, i.e. what the Azure Functions host would invoke for a batch of events."""
-
-    def _load(dt_environment, dt_token="test-token", location="westeurope"):
-        monkeypatch.setenv("DT_ENVIRONMENT", dt_environment)
-        monkeypatch.setenv("DT_TOKEN", dt_token)
-        monkeypatch.setenv("AZURE_LOCATION", location)
-        monkeypatch.setenv("EH_NAME", "metrics")           # the Event Hub function is only registered with a hub name
-        monkeypatch.delenv("REGION_NAME", raising=False)
-        sys.modules.pop("function_app", None)
-        module = importlib.import_module("function_app")
-        return module.run._function.get_user_function()
-
-    return _load
 
 
 class MockAzure:
@@ -168,7 +140,6 @@ def load_poller(monkeypatch, azure):
     def _load(dt_environment, config, location="westeurope", delay=None, tag=None, subscriptions=None):
         monkeypatch.setenv("DT_ENVIRONMENT", dt_environment)
         monkeypatch.setenv("DT_TOKEN", "test-token")
-        monkeypatch.setenv("AZURE_LOCATION", location)
         monkeypatch.setenv("AZMON_ARM_URL", azure.url)
         monkeypatch.setenv("AZMON_METRICS_URL", azure.url + "/{region}")
         if config is None:

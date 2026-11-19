@@ -1,5 +1,4 @@
-import logging, os, re, json, datetime as dt, requests, azure.functions as func
-from typing import List
+import logging, os, re, datetime as dt, requests, azure.functions as func
 
 import azmon
 
@@ -8,12 +7,7 @@ app = func.FunctionApp()
 DT_URL = os.environ["DT_ENVIRONMENT"].rstrip("/") + "/api/v2/metrics/ingest"
 HEADERS = {"Authorization": f"Api-Token {os.environ['DT_TOKEN']}",
            "Content-Type": "text/plain; charset=utf-8"}
-KEY_SUFFIX = ".metricstream"       # appended to every metric key to avoid clashing with the native metrics
-
-# The Event Hub, the exporting DCR / diagnostic setting and the monitored resources share one region, so the
-# location is constant per deployment.
-# Set AZURE_LOCATION explicitly (e.g. "westeurope"); falls back to REGION_NAME (e.g. "West Europe") set by Azure Functions.
-LOCATION = re.sub(r"[^a-z0-9]", "", (os.environ.get("AZURE_LOCATION") or os.environ.get("REGION_NAME", "")).lower())
+KEY_SUFFIX = os.environ.get("METRIC_KEY_SUFFIX", ".nearrealtime")   # appended to every metric key; keeps these series apart from the native metrics
 
 RID = re.compile(r"^/subscriptions/(?P<sub>[^/]+)/resourcegroups/(?P<rg>[^/]+)/providers/(?P<ns>[^/]+)/(?P<rest>.+)$", re.I)
 
@@ -51,25 +45,8 @@ def esc(v) -> str:
     return str(v).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def iter_records(body):
-    """Yield flat metric records from either export format.
-
-    DCR export:                  one flat JSON object per metric, e.g. {"Average": "1", "resourceId": ..., ...}
-    Diagnostic settings export:  [{"records": [{"count": 2, "resourceId": ..., ...}, ...]}]
-    Non-metric records (e.g. resource logs sent to the same hub) are dropped later in to_line().
-    """
-    if isinstance(body, list):
-        for item in body:
-            yield from iter_records(item)
-    elif isinstance(body, dict):
-        if isinstance(body.get("records"), list):
-            yield from iter_records(body["records"])
-        else:
-            yield body
-
-
 def to_line(raw: dict):
-    r = {k.lower(): v for k, v in raw.items()}                  # DCR: "Count"/"resourceId", diag settings: "count"/"resourceId"
+    r = {k.lower(): v for k, v in raw.items()}
     required = ("resourceid", "metricname", "count", "minimum", "maximum", "total", "time")
     if any(r.get(k) in (None, "") for k in required):
         return None                                             # not a metric record
@@ -88,7 +65,7 @@ def to_line(raw: dict):
         "azure.resource.name": p["name"],
         "azure.resource.type": p["arm_type"],
     }
-    location = r.get("location") or LOCATION                    # polled records carry their resource's region
+    location = r.get("location")                                # the resource's region, from Azure Resource Graph
     if location:
         dims["azure.location"] = re.sub(r"[^a-z0-9]", "", str(location).lower())
     dimension = r.get("dimension")                              # DCR export only; diag settings have no dimensions
@@ -135,25 +112,8 @@ def post_lines(lines):
                                      response=resp)
 
 
-# The Event Hub function is only registered when EH_NAME is set, so a poller-only deployment (the default) carries no
-# Event Hub trigger that would fail without a hub.
-if os.environ.get("EH_NAME"):
-    @app.event_hub_message_trigger(arg_name="events", event_hub_name="%EH_NAME%",
-                                   connection="EH_CONN", cardinality="many")
-    # typing.List, not builtin list[...]: the Python worker rejects the latter (FunctionLoadError)
-    def run(events: List[func.EventHubEvent]):
-        lines = []
-        for e in events:
-            for r in iter_records(json.loads(e.get_body())):
-                line = to_line(r)
-                if line:
-                    lines.append(line)
-        post_lines(lines)
-
-
-# The default pipeline: poll the Azure Monitor metrics API every minute for the minute that is
+# Poll the Azure Monitor metrics API every minute for the minute that is
 # AZMON_DELAY_MINUTES (default 2) old and forward it. Does nothing unless AZMON_TAG or AZMON_CONFIG is set (see azmon.py).
-# Don't poll resources that are also exported through a DCR / diagnostic setting.
 @app.timer_trigger(schedule="0 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def poll(timer: func.TimerRequest) -> None:
     raw, tag = os.environ.get("AZMON_CONFIG"), os.environ.get("AZMON_TAG")
