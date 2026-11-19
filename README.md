@@ -17,6 +17,16 @@ tagged Azure resources ─► timer (every minute) ─► Resource Graph ─► 
 
 You need: Azure CLI, [Functions Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local) (`func`), Contributor on the subscription (plus Owner / User Access Administrator once for step 4) and a Dynatrace token with `metrics.ingest` (add `storage:metrics:read` to check with DQL).
 
+**Quick way:** [scripts/deploy.sh](scripts/deploy.sh) does steps 1�4 below with default settings (re-run it to update):
+
+```bash
+az login
+export DT_ENVIRONMENT=https://abc12345.live.dynatrace.com DT_TOKEN=<token with metrics.ingest>   # or put them in .env.local
+./scripts/deploy.sh                      # optional: SUBSCRIPTIONS=<id>,<id> RG=... LOCATION=... APP=...
+```
+
+Then tag your resources (step 5). The steps below are the same thing by hand, in case you want to know how it works or change something.
+
 **1. Variables**
 
 ```bash
@@ -27,14 +37,14 @@ DT_ENVIRONMENT=https://abc12345.live.dynatrace.com   # https:// required
 DT_TOKEN=<token with metrics.ingest>
 ```
 
-**2. Function app** (Flex Consumption, Python, managed identity)
+**2. Function app** (Flex Consumption, Python, managed identity, no Application Insights)
 
 ```bash
 az provider register --namespace Microsoft.Web --wait
 az group create -n $RG -l $LOC
 az storage account create -g $RG -n $ST -l $LOC --sku Standard_LRS
 az functionapp create -g $RG -n $APP --storage-account $ST --flexconsumption-location $LOC \
-  --runtime python --runtime-version 3.11
+  --runtime python --runtime-version 3.11 --disable-app-insights
 PRINCIPAL=$(az functionapp identity assign -g $RG -n $APP --query principalId -o tsv)
 ```
 
@@ -61,7 +71,7 @@ done
 az tag update --resource-id <resource id> --operation merge --tags dynatrace-nearrealtime=true
 ```
 
-**6. Check** (allow 5–10 minutes: Resource Graph needs a few minutes to see a new tag). The Function logs `polled hh:mm: forwarding N data points` each minute (`func azure functionapp logstream $APP`). `401/403` from Azure means the role is missing or not active yet; `400` from Dynatrace quotes the rejected lines. In Dynatrace:
+**6. Check** (allow 5–10 minutes: Resource Graph needs a few minutes to see a new tag). The Function logs `polled hh:mm: forwarding N data points` each minute, but the app is created without Application Insights, so there is no log view unless you add it (`az monitor app-insights component create`, then set `APPLICATIONINSIGHTS_CONNECTION_STRING` as an app setting). `401/403` from Azure means the role is missing or not active yet; `400` from Dynatrace quotes the rejected lines. In Dynatrace:
 
 ```
 timeseries sum(cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.nearrealtime), by:{azure.resource.id}, from:now()-30m
