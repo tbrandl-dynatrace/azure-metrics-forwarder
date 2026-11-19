@@ -17,7 +17,7 @@ tagged Azure resources ─► timer (every minute) ─► Resource Graph ─► 
 
 You need: Azure CLI, [Functions Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local) (`func`), Contributor on the subscription (plus Owner / User Access Administrator once for step 4) and a Dynatrace token with `metrics.ingest` (add `storage:metrics:read` to check with DQL).
 
-**Quick way:** [scripts/deploy.sh](scripts/deploy.sh) does steps 1�4 below with default settings (re-run it to update):
+**Quick way:** [scripts/deploy.sh](scripts/deploy.sh) does steps 1-4 below with default settings (re-run it to update):
 
 ```bash
 az login
