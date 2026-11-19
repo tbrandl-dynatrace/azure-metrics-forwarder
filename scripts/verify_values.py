@@ -93,9 +93,7 @@ def main():
         f"filter: azure.resource.id == \"{rid}\", interval: 1m, from: now()-45m")
     dt_slots = dynatrace_by_slot(records[0]) if records else {}
 
-    entry = {"subscription": sub, "resourceGroup": rg, "resourceType": "Microsoft.KeyVault/vaults",
-             "metrics": [COUNTER_METRIC, GAUGE_METRIC]}
-    az_slots = azure_by_slot(azmon.fetch_records(entry, now - dt.timedelta(minutes=44), now))
+    az_slots = azure_by_slot(azmon.fetch_resource(rid, [COUNTER_METRIC, GAUGE_METRIC], now - dt.timedelta(minutes=44), now))
 
     rows, bad = compare(dt_slots, az_slots, now)
     for slot, text in rows:

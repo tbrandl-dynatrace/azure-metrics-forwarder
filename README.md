@@ -7,7 +7,7 @@ tagged Azure resources ─► timer (every minute) ─► Resource Graph (find t
 ```
 
 - Metric keys: `cloud.azure.<provider_namespace>.<resource_type>.<MetricName>` plus a configurable suffix (`METRIC_KEY_SUFFIX`, default **`.nearrealtime`**), e.g. `cloud.azure.microsoft_keyvault.vaults.ServiceApiHit.nearrealtime`. The suffix keeps the series apart from the metrics of the native Dynatrace Azure integration.
-- Attributes: `cloud.provider`, `azure.subscription`, `azure.resource.group`, `azure.resource.id`, `azure.resource.name`, `azure.resource.type`, `azure.location`, plus the metric's own dimensions (explicit config only).
+- Attributes: `cloud.provider`, `azure.subscription`, `azure.resource.group`, `azure.resource.id`, `azure.resource.name`, `azure.resource.type`, `azure.location`, plus **all of the metric's dimensions** (e.g. `activityname`, `statuscode` for Key Vault; lower-cased names).
 - Counters (Azure *Total* / *Count* aggregation, e.g. hits, transactions, bytes) are sent as Dynatrace counters (`count,delta`), everything else as gauges (`gauge,min,max,sum,count`). Timestamps are the start of Azure's one-minute slot (UTC).
 
 > **Prefer Azure to push?** The [event-hub-export](event-hub-export/README.md) folder contains the alternative solution: metrics exported by DCRs or diagnostic settings to an Event Hub, forwarded by an Event Hub-triggered Function. Use it for per-dimension series via DCR or for resources the batch API can't read. It is a separate Function app with its own deployment, tests and instructions.
@@ -20,7 +20,7 @@ You need: an Azure subscription (Contributor to create things; **Owner / User Ac
 
 ```bash
 az login && az account set --subscription <subscription id>
-SUB=$(az account show --query id -o tsv)
+SUBS="<subscription id 1>,<subscription id 2>"           # every subscription to poll; one is fine, or leave out AZMON_SUBSCRIPTIONS for all
 RG=rg-dt-metrics; LOC=westeurope; APP=dt-metrics-poller-$RANDOM; ST=dtmetrics$RANDOM
 DT_ENVIRONMENT=https://abc12345.live.dynatrace.com        # https:// required
 DT_TOKEN=<token with metrics.ingest>
@@ -42,18 +42,18 @@ PRINCIPAL=$(az functionapp identity assign -g $RG -n $APP --query principalId -o
 ```bash
 az functionapp config appsettings set -g $RG -n $APP --settings \
   DT_ENVIRONMENT=$DT_ENVIRONMENT DT_TOKEN=$DT_TOKEN \
-  AZMON_TAG=dynatrace-metrics AZMON_SUBSCRIPTIONS=$SUB      # optional: METRIC_KEY_SUFFIX=.nearrealtime AZMON_DELAY_MINUTES=2
+  AZMON_TAG=dynatrace-metrics AZMON_SUBSCRIPTIONS=$SUBS      # optional: METRIC_KEY_SUFFIX=.nearrealtime AZMON_DELAY_MINUTES=2
 func azure functionapp publish $APP --python                # run from the repository root
 ```
 
-**4. Let the Function read Azure Monitor** (a role assignment: ask an Owner / User Access Administrator): **Monitoring Reader on every polled subscription**. The batch API requires it at subscription level; Reader on the resources alone is not enough.
+**4. Let the Function read Azure Monitor** (a role assignment: ask an Owner / User Access Administrator): **Monitoring Reader on every polled subscription**, i.e. once per subscription in `$SUBS`. The batch API requires it at subscription level; Reader on the resources alone is not enough.
 
 ```bash
 az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal \
   --role "Monitoring Reader" --scope /subscriptions/$SUB
 ```
 
-**5. Tag what you want to monitor** (any resource type; the tag value selects the metrics, see below)
+**5. Tag what you want to monitor**: any resource, of any type, in any resource group of any of the subscriptions. There is nothing else to configure; the tag value can optionally restrict the metrics (see below).
 
 ```bash
 az tag update --resource-id <resource id> --operation merge --tags dynatrace-metrics=true
@@ -78,7 +78,7 @@ To stop everything: `az group delete -n $RG`.
 pip install -r requirements.txt                 # once (a venv is a good idea)
 az login
 python scripts/poll_local.py                    # resources tagged dynatrace-metrics, every subscription you can read
-python scripts/poll_local.py --tag demo --subscriptions <id> --delay-minutes 2   # other tag / one subscription / delay
+python scripts/poll_local.py --tag demo --subscriptions <id>,<id> --delay-minutes 2   # other tag / chosen subscriptions / delay
 ```
 
 Stop the deployed Function (or don't tag the same resources) while you do this, otherwise counters are sent twice.
@@ -90,18 +90,22 @@ Stop the deployed Function (or don't tag the same resources) while you do this, 
 | `DT_ENVIRONMENT` | Dynatrace environment URL including `https://`. |
 | `DT_TOKEN` | API token with `metrics.ingest`. |
 | `AZMON_TAG` | Tag name to look for. Setting it enables tag-based polling. |
-| `AZMON_SUBSCRIPTIONS` | Optional, comma-separated subscription IDs to limit the search (default: all the identity can read). |
+| `AZMON_SUBSCRIPTIONS` | Optional, comma-separated subscription IDs to poll, as many as you like (default: every subscription the identity can read). The identity needs Monitoring Reader on each. A subscription that fails (e.g. role missing) is logged and skipped, the others are still polled. |
 | `AZMON_DELAY_MINUTES` | Optional, default `2`: how old the polled minute is. `1` polls the minute that just ended and loses minutes Azure hasn't finished yet. |
 | `METRIC_KEY_SUFFIX` | Optional, default `.nearrealtime`: appended to every metric key. |
-| `AZMON_CONFIG` | Optional advanced override, see [Explicit configuration](#explicit-configuration-optional). Can be combined with `AZMON_TAG`. |
+| `AZMON_DIMENSIONS` | Optional, default `all`: split every metric by all its dimensions. `none` aggregates over dimensions instead (and skips metrics that Azure only answers per dimension). |
+| `AZMON_TOP` | Optional, default `100`: maximum number of series per metric and resource when splitting by dimensions. |
+| `AZMON_PARALLELISM` | Optional, default `8`: how many (subscription, resource type) groups are queried in parallel. |
 
 ## How it works
 
-The `poll` function ([function_app.py](function_app.py), helpers in [azmon.py](azmon.py)) is triggered by a timer **every minute**. Each run asks Azure Resource Graph for the tagged resources, then asks the [Metrics Batch API](https://learn.microsoft.com/en-us/rest/api/monitor/metrics-batch/batch) for the one-minute slot that is **2 minutes old** (`AZMON_DELAY_MINUTES`, so Azure has had time to finalise it), converts the data points to Dynatrace line protocol (key suffix `.nearrealtime`, `azure.*` attributes) and posts them. It needs no Event Hub and has no export setup lag, and it uses each resource's real region for `azure.location`. It does nothing until `AZMON_TAG` or `AZMON_CONFIG` is set.
+The `poll` function ([function_app.py](function_app.py), helpers in [azmon.py](azmon.py)) is triggered by a timer **every minute**. Each run asks Azure Resource Graph for the resources carrying the tag (all resource types, resource groups and subscriptions in scope), reads the metric definitions of each resource type (cached for an hour), then asks the [Metrics Batch API](https://learn.microsoft.com/en-us/rest/api/monitor/metrics-batch/batch) for the one-minute slot that is **2 minutes old** (`AZMON_DELAY_MINUTES`, so Azure has had time to finalise it). Subscription / resource type groups are queried in parallel, the data points are converted to Dynatrace line protocol (key suffix `.nearrealtime`, `azure.*` attributes) and posted. It needs no Event Hub and has no export setup lag, and it uses each resource's real region for `azure.location`. It does nothing until `AZMON_TAG` is set.
+
+**Dimensions:** every metric is requested split by all the dimensions listed in its Azure metric definition (`<dim> eq '*'` for each), so you get one Dynatrace series per dimension combination without configuring anything. In Dynatrace, aggregate over the dimensions you don't care about as usual (`sum` of a counter over all `statuscode` values is the total). Set `AZMON_DIMENSIONS=none` to ingest one aggregated series per metric instead; that also drops the few metrics Azure only answers per dimension.
 
 ### Choosing what to poll: just tag it
 
-Set the app setting `AZMON_TAG` to a tag name, e.g. `dynatrace-metrics`, and then **tag the Azure resources you want in Dynatrace** with that tag. That's all: resources are found with Azure Resource Graph (across every subscription the Function's identity can read, new tags are picked up within ~10 minutes), and **all their per-minute metrics are collected automatically** from the metric definitions of their resource type (metrics that need a dimension filter or have no 1-minute grain are skipped).
+Set the app setting `AZMON_TAG` to a tag name, e.g. `dynatrace-metrics`, and then **tag the Azure resources you want in Dynatrace** with that tag. That's all: resources are found with Azure Resource Graph (across every subscription the Function's identity can read, new tags are picked up within ~10 minutes), and **all their per-minute metrics are collected automatically** from the metric definitions of their resource type (metrics without a 1-minute grain are skipped).
 
 ```bash
 # the Function looks for this tag (app setting AZMON_TAG, set in step 3); tag whatever should be monitored, any resource type
@@ -119,21 +123,6 @@ The tag value controls the metrics:
 Tag *names* are matched exactly as written; the value matching above is case-insensitive. Tag a resource group or subscription? Azure tags don't inherit, so tag the resources themselves (an Azure Policy with the *Inherit a tag from the resource group* effect can do that for you).
 
 **Cost / volume:** "all metrics" can be a lot of data points per resource (a VM has dozens of metrics, every minute). Restrict via the tag value for chatty resource types, or start with a few resources and check the ingest volume in Dynatrace.
-
-### Explicit configuration (optional)
-
-`AZMON_CONFIG` selects resources by type (and optionally resource group) and lets you split metrics by dimension, which the tag mode doesn't do:
-
-```json
-[{"subscription": "<subscription id>",
-  "resourceType": "Microsoft.KeyVault/vaults",
-  "resourceGroup": "optional resource group filter",
-  "metrics": ["ServiceApiHit", "ServiceApiLatency"],
-  "dimensions": ["ActivityName"],
-  "top": 100}]
-```
-
-`dimensions` (optional) splits the metrics by those dimension names (`<dim> eq '*'`); `top` caps the series per metric and resource (default 100). Without `dimensions` values are aggregated across dimensions. Resources are all resources of that type in the subscription (or resource group).
 
 **Azure permissions:** see step 4: Monitoring Reader on each polled subscription. Finding tagged resources only needs *Reader* (Azure Resource Graph). Locally the poller uses your `az login` instead, so it works with whatever access you have.
 
@@ -199,5 +188,5 @@ The tests run the `poll` handler against local mocks of Azure Resource Graph, AR
 
 - A poll that fails (Azure throttling, Dynatrace outage) loses that minute; there is no replay as with an Event Hub.
 - Custom / guest metrics (namespaces other than the resource type) are not supported by the batch API.
-- Metrics that need a dimension filter or have no 1-minute grain are skipped in tag mode; use `AZMON_CONFIG` for dimensions.
+- Metrics without a 1-minute time grain are skipped. Series beyond `AZMON_TOP` per metric and resource are dropped by Azure.
 - Consider whether the native Dynatrace Azure integration already covers your needs; this Function is for near-real-time metrics and extra control.

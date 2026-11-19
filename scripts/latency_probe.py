@@ -193,7 +193,6 @@ def main():
         deadline = gen_end + grace
         lookback = a.minutes + a.drain_minutes + 2
     tracker = Tracker(first_slot, last_slot)
-    entry = {"subscription": sub, "resourceGroup": rg, "resourceType": "Microsoft.KeyVault/vaults", "metrics": [METRIC]}
     dql_text = (f"timeseries s = sum(`{DT_KEY}`), by:{{azure.resource.id}}, filter: azure.resource.id == \"{rid}\", "
                 f"interval: 1m, from: now()-{lookback + 3}m")
 
@@ -213,7 +212,7 @@ def main():
             if continuous:
                 tracker.last_slot = now.replace(second=0, microsecond=0) - SLOT
             try:
-                azure_new = tracker.observe("azure", azure_slots(azmon.fetch_records(entry, now - dt.timedelta(minutes=lookback), now)), now)
+                azure_new = tracker.observe("azure", azure_slots(azmon.fetch_resource(rid, [METRIC], now - dt.timedelta(minutes=lookback), now)), now)
             except Exception as e:
                 azure_new = []; print(f"  azure query failed: {str(e)[:150]}")
             try:

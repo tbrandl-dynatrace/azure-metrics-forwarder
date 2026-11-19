@@ -1,27 +1,22 @@
-"""Pull platform metrics from Azure Monitor (Metrics Batch API) and shape them like the DCR / diagnostic-settings
-export records, so function_app.to_line() can turn them into Dynatrace line protocol.
+"""Pull platform metrics from Azure Monitor (Metrics Batch API) and shape them as flat records that
+function_app.to_line() turns into Dynatrace line protocol.
 
-Two ways to say what to poll (both can be used together):
+What to poll is decided by an Azure tag (AZMON_TAG, e.g. "dynatrace-metrics"): every resource that carries it, of any
+resource type, in any resource group, is polled. Resources are found with Azure Resource Graph in all subscriptions the
+identity can read, or only in AZMON_SUBSCRIPTIONS (comma-separated, any number). All per-minute metrics of the
+resource type are collected, split by ALL of their dimensions (from the metric definitions); AZMON_DIMENSIONS=none
+aggregates over dimensions instead. The tag value can restrict the metrics: "true" / "all" = everything,
+"ServiceApiHit;ServiceApiLatency" = only those, "false" / "no" / "off" / "0" = not polled.
 
-1. Tags (simplest): set AZMON_TAG to a tag name, e.g. "dynatrace-metrics". Every resource that carries that tag is
-   polled (found with Azure Resource Graph, in all subscriptions the identity can read, or only those in
-   AZMON_SUBSCRIPTIONS), and all its per-minute metrics are collected automatically (from the metric definitions of
-   its resource type). The tag value can restrict the metrics: "true" / "all" = everything, "ServiceApiHit;ServiceApiLatency"
-   = only those, "false" / "no" / "off" / "0" = not polled.
-
-2. Explicit config (app setting AZMON_CONFIG, JSON list; one entry per resource type):
-     [{"subscription": "<id>", "resourceType": "Microsoft.KeyVault/vaults", "resourceGroup": "optional-rg-filter",
-       "metrics": ["ServiceApiHit", "ServiceApiLatency"],
-       "dimensions": ["ActivityName"],     # optional: split by these dimensions
-       "top": 100}]                        # optional: max series per metric/resource when splitting (default 100)
-
-Other settings: AZMON_DELAY_MINUTES (default 2), AZMON_ARM_URL, AZMON_METRICS_URL (template with {region}).
+Other settings: AZMON_DELAY_MINUTES (default 2), AZMON_TOP (max series per metric and resource when splitting, default
+100), AZMON_PARALLELISM (default 8), AZMON_ARM_URL, AZMON_METRICS_URL (template with {region}).
 Azure auth: DefaultAzureCredential (managed identity in Azure, `az login` locally). The identity needs
 Monitoring Reader on each polled subscription (required by the batch API); Reader is enough to find resources.
 """
 import datetime as dt
-import json, logging, os, re, time
+import logging, os, re, time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -36,13 +31,13 @@ DEFINITIONS_API_VERSION = "2018-01-01"
 MAX_RESOURCES_PER_BATCH = 50           # API limit: same subscription, region and resource type
 METRICS_PER_CALL = 20                  # metrics per request (Azure Monitor limit)
 RESOURCE_CACHE_SECONDS = 600
+DEFAULT_TOP = 100                      # max series per metric and resource when splitting by dimensions
 DEFINITION_CACHE_SECONDS = 3600
 AGGREGATIONS = "average,count,maximum,minimum,total"
 ALL_METRICS_VALUES = {"", "true", "yes", "on", "1", "all", "*", "y"}
 TAG_OFF_VALUES = ("false", "no", "off", "0", "none")
 
 _credential = None
-_resource_cache = {}                   # (subscription, type, resource group) -> (fetched at, [(resource id, location)])
 _tagged_cache = {}                     # (tag, subscriptions) -> (fetched at, [row])
 _definition_cache = {}                 # resource type -> (fetched at, [metric names])
 _warned = set()                        # (metric, error code) already logged, so a broken metric doesn't flood the log
@@ -54,17 +49,6 @@ def get_token(scope: str) -> str:
         from azure.identity import DefaultAzureCredential
         _credential = DefaultAzureCredential()
     return _credential.get_token(scope).token
-
-
-def load_config(raw: str):
-    cfg = json.loads(raw)
-    if isinstance(cfg, dict):
-        cfg = [cfg]
-    for i, c in enumerate(cfg):
-        for k in ("subscription", "resourceType", "metrics"):
-            if not c.get(k):
-                raise ValueError(f"AZMON_CONFIG[{i}] is missing '{k}'")
-    return cfg
 
 
 def target_window(now: dt.datetime = None, delay_minutes: int = 2):
@@ -87,34 +71,6 @@ def _request(method, url, scope, retries=2, **kw):
             continue
         r.raise_for_status()
         return r.json()
-
-
-# --- explicit config: all resources of a type ---------------------------------------------------------------------
-
-def list_resources(subscription, resource_type, resource_group=None):
-    """[(resource id, location)] for a resource type, cached for a few minutes."""
-    key = (subscription, resource_type.lower(), (resource_group or "").lower())
-    hit = _resource_cache.get(key)
-    if hit and time.time() - hit[0] < RESOURCE_CACHE_SECONDS:
-        return hit[1]
-    scope = f"/subscriptions/{subscription}" + (f"/resourceGroups/{resource_group}" if resource_group else "")
-    url = f"{ARM_URL}{scope}/resources"
-    params = {"$filter": f"resourceType eq '{resource_type}'", "api-version": ARM_API_VERSION}
-    found = []
-    while url:
-        body = _request("GET", url, ARM_SCOPE, params=params)
-        found += [(r["id"], r.get("location", "global")) for r in body.get("value", [])]
-        url, params = body.get("nextLink"), None
-    _resource_cache[key] = (time.time(), found)
-    return found
-
-
-def fetch_records(entry, start, end):
-    """Query one AZMON_CONFIG entry and return flat metric records (dicts) for the [start, end) minute."""
-    resources = list_resources(entry["subscription"], entry["resourceType"], entry.get("resourceGroup"))
-    kinds = metric_kinds(resources[0][0], entry["resourceType"]) if resources else {}
-    return query_batch(entry["subscription"], entry["resourceType"], resources, entry["metrics"],
-                       entry.get("dimensions"), int(entry.get("top", 100)), start, end, kinds)
 
 
 # --- tag-based discovery -------------------------------------------------------------------------------------------
@@ -151,8 +107,9 @@ def discover_tagged(tag, subscriptions=None):
 
 
 def metric_definitions(resource_id, resource_type):
-    """Metric definitions of a resource type (cached): [{"name", "kind", "usable"}].
-    usable: per-minute grain available and no dimension filter required.
+    """Metric definitions of a resource type (cached): [{"name", "kind", "dimensions", "required", "per_minute"}].
+    dimensions: names of the metric's dimensions; required: Azure only answers when they are split;
+    per_minute: a 1-minute time grain is available.
     kind:   "count" for metrics Azure aggregates as a Total (bytes, transactions ... summed per minute, i.e. counters),
             "samples" for metrics whose primary aggregation is Count (e.g. Key Vault ServiceApiHit: every event is a
             sample, the number of samples per minute is the counter),
@@ -171,19 +128,33 @@ def metric_definitions(resource_id, resource_type):
         grains = [a.get("timeGrain") for a in d.get("metricAvailabilities") or []]
         defs.append({"name": name,
                      "kind": {"total": "count", "count": "samples"}.get(str(d.get("primaryAggregationType", "")).lower(), "gauge"),
-                     "usable": not d.get("isDimensionRequired") and (not grains or "PT1M" in grains)})
+                     "dimensions": [x.get("value") for x in d.get("dimensions") or [] if x.get("value")],
+                     "required": bool(d.get("isDimensionRequired")),
+                     "per_minute": not grains or "PT1M" in grains})
     _definition_cache[key] = (time.time(), defs)
     return defs
 
 
-def metric_names(resource_id, resource_type):
-    """Names of the per-minute metrics of a resource type that can be queried without a dimension filter."""
-    return [d["name"] for d in metric_definitions(resource_id, resource_type) if d["usable"]]
-
-
 def metric_kinds(resource_id, resource_type):
-    """{lower-case metric name: "count" | "gauge"} for a resource type."""
+    """{lower-case metric name: "count" | "samples" | "gauge"} for a resource type."""
     return {d["name"].lower(): d["kind"] for d in metric_definitions(resource_id, resource_type)}
+
+
+def metric_plan(resource_id, resource_type, selection, split_dimensions=True):
+    """{dimension names (tuple): [metric names]}: which metrics to request, each with the dimensions to split by.
+    selection None = every per-minute metric of the type; otherwise just the listed names."""
+    defs = {d["name"].lower(): d for d in metric_definitions(resource_id, resource_type)}
+    if selection is None:
+        names = [(d["name"], d) for d in defs.values() if d["per_minute"]]
+    else:
+        names = [(n, defs.get(n.lower())) for n in selection]
+    plan = defaultdict(list)
+    for name, d in names:
+        dims = tuple(d["dimensions"]) if (d and split_dimensions) else ()
+        if d and d["required"] and not dims:
+            continue                                    # Azure rejects these without a dimension split
+        plan[dims].append(name)
+    return dict(plan)
 
 
 def metrics_from_tag_value(value):
@@ -194,18 +165,52 @@ def metrics_from_tag_value(value):
     return tuple(m.strip() for m in re.split(r"[;,]", v) if m.strip())
 
 
-def fetch_tagged(tag, subscriptions, start, end):
-    """Poll every resource carrying `tag`, grouped by subscription / resource type / metric selection."""
+def fetch_tagged(tag, subscriptions, start, end, split_dimensions=True, top=DEFAULT_TOP, parallelism=8):
+    """Poll every resource carrying `tag`, grouped by subscription / resource type / metric selection.
+    Groups run in parallel; one failing group (e.g. no Monitoring Reader in one subscription) is logged and does not
+    stop the others. Raises only when every group failed."""
     groups = defaultdict(list)
     for row in discover_tagged(tag, subscriptions):
         groups[(row["subscriptionId"], row["type"].lower(), metrics_from_tag_value(row.get("v")))].append(row)
-    records = []
-    for (sub, rtype, selection), rows in groups.items():
-        metrics = list(selection) if selection else metric_names(rows[0]["id"], rtype)
-        if metrics:
-            records += query_batch(sub, rtype, [(r["id"], r.get("location") or "global") for r in rows],
-                                   metrics, None, 100, start, end, metric_kinds(rows[0]["id"], rtype))
+
+    def poll_group(item):
+        (sub, rtype, selection), rows = item
+        kinds = metric_kinds(rows[0]["id"], rtype)
+        resources = [(r["id"], r.get("location") or "global") for r in rows]
+        records = []
+        for dims, metrics in metric_plan(rows[0]["id"], rtype, selection, split_dimensions).items():
+            records += query_batch(sub, rtype, resources, metrics, list(dims) or None, top, start, end, kinds)
+        return records
+
+    records, errors = [], []
+    with ThreadPoolExecutor(max_workers=max(1, parallelism)) as pool:
+        for (key, _), result in zip(groups.items(), pool.map(_safely(poll_group), groups.items())):
+            if isinstance(result, Exception):
+                errors.append(result)
+                logging.error("polling %s in subscription %s failed: %s", key[1], key[0], str(result)[:300])
+            else:
+                records += result
+    if errors and len(errors) == len(groups):
+        raise errors[0]
     return records
+
+
+def _safely(fn):
+    def wrapper(item):
+        try:
+            return fn(item)
+        except Exception as e:
+            return e
+    return wrapper
+
+
+def fetch_resource(resource_id, metrics, start, end):
+    """Metrics (no dimension split) of one resource, for scripts and probes. Looks up the region itself."""
+    m = re.match(r"^/subscriptions/([^/]+)/resourcegroups/[^/]+/providers/([^/]+)/([^/]+)/", resource_id + "/", re.I)
+    sub, rtype = m[1], f"{m[2]}/{m[3]}"
+    location = _request("GET", f"{ARM_URL}{resource_id}", ARM_SCOPE, params={"api-version": ARM_API_VERSION}).get("location", "global")
+    return query_batch(sub, rtype, [(resource_id, location)], list(metrics), None, DEFAULT_TOP, start, end,
+                       metric_kinds(resource_id, rtype))
 
 
 # --- Metrics Batch API ---------------------------------------------------------------------------------------------

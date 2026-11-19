@@ -112,21 +112,20 @@ def post_lines(lines):
                                      response=resp)
 
 
-# Poll the Azure Monitor metrics API every minute for the minute that is
-# AZMON_DELAY_MINUTES (default 2) old and forward it. Does nothing unless AZMON_TAG or AZMON_CONFIG is set (see azmon.py).
+# Poll the Azure Monitor metrics API every minute for the minute that is AZMON_DELAY_MINUTES (default 2) old and
+# forward it. Does nothing unless AZMON_TAG is set (see azmon.py).
 @app.timer_trigger(schedule="0 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
 def poll(timer: func.TimerRequest) -> None:
-    raw, tag = os.environ.get("AZMON_CONFIG"), os.environ.get("AZMON_TAG")
-    if not raw and not tag:
-        logging.info("neither AZMON_TAG nor AZMON_CONFIG is set; metrics polling is disabled")
+    tag = os.environ.get("AZMON_TAG")
+    if not tag:
+        logging.info("AZMON_TAG is not set; metrics polling is disabled")
         return
     start, end = azmon.target_window(delay_minutes=int(os.environ.get("AZMON_DELAY_MINUTES", "2")))
-    records = []
-    for entry in azmon.load_config(raw) if raw else []:
-        records += azmon.fetch_records(entry, start, end)
-    if tag:
-        subscriptions = [s.strip() for s in os.environ.get("AZMON_SUBSCRIPTIONS", "").split(",") if s.strip()] or None
-        records += azmon.fetch_tagged(tag, subscriptions, start, end)
+    subscriptions = [s.strip() for s in os.environ.get("AZMON_SUBSCRIPTIONS", "").split(",") if s.strip()] or None
+    split = os.environ.get("AZMON_DIMENSIONS", "all").strip().lower() not in ("none", "off", "false", "no", "0")
+    records = azmon.fetch_tagged(tag, subscriptions, start, end, split_dimensions=split,
+                                 top=int(os.environ.get("AZMON_TOP", azmon.DEFAULT_TOP)),
+                                 parallelism=int(os.environ.get("AZMON_PARALLELISM", "8")))
     lines = []
     for r in records:
         line = to_line(r)

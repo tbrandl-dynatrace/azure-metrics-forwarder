@@ -67,7 +67,7 @@ def dynatrace():
 
 
 class MockAzure:
-    """Local stand-in for ARM (list resources) and the regional Azure Monitor Metrics Batch endpoint."""
+    """Local stand-in for Azure Resource Graph, the metric definitions API and the regional Azure Monitor Metrics Batch endpoint."""
 
     def __init__(self):
         self.resources = []         # [{"id", "location"}]
@@ -113,7 +113,10 @@ class MockAzure:
                         "params": {k: v[0] for k, v in parse_qs(u.query).items()}, "resourceids": body["resourceids"],
                         "auth": self.headers.get("Authorization")}
                 outer.batch_calls.append(call)
-                self._send(outer.batch_response(call))
+                answer = outer.batch_response(call)
+                if isinstance(answer, tuple):                         # (status, body): simulate an Azure error
+                    return self._send(answer[1], answer[0])
+                self._send(answer)
 
             def log_message(self, *args):
                 pass
@@ -137,15 +140,11 @@ def azure():
 def load_poller(monkeypatch, azure):
     """Import function_app / azmon fresh, pointed at the mock Azure and the given Dynatrace URL; returns poll()."""
 
-    def _load(dt_environment, config, location="westeurope", delay=None, tag=None, subscriptions=None):
+    def _load(dt_environment, tag="dynatrace-metrics", delay=None, subscriptions=None):
         monkeypatch.setenv("DT_ENVIRONMENT", dt_environment)
         monkeypatch.setenv("DT_TOKEN", "test-token")
         monkeypatch.setenv("AZMON_ARM_URL", azure.url)
         monkeypatch.setenv("AZMON_METRICS_URL", azure.url + "/{region}")
-        if config is None:
-            monkeypatch.delenv("AZMON_CONFIG", raising=False)
-        else:
-            monkeypatch.setenv("AZMON_CONFIG", json.dumps(config))
         if delay is not None:
             monkeypatch.setenv("AZMON_DELAY_MINUTES", str(delay))
         if tag is None:
