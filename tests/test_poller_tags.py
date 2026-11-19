@@ -179,3 +179,25 @@ def test_metrics_without_definition_info_stay_gauges(dynatrace, tagged, load_pol
     poll = load_poller(dynatrace.url, None, tag="dynatrace-metrics")
     poll(None)
     assert [parse(l)["type"] for l in dynatrace.lines] == ["gauge"]
+
+
+def test_fractional_sample_counts_are_sent_as_one_sample_with_the_average():
+    import function_app
+    base = {"resourceId": f"{KV}/vault-a", "metricName": "SaturationShoebox", "time": "2026-11-17T09:00:00Z",
+            "minimum": 0.1, "maximum": 0.3, "average": 0.2}
+    line = function_app.to_line({**base, "count": 0.0001, "total": 0.00002})
+    assert "count=1 " in line and "sum=0.2," in line
+    whole = function_app.to_line({**base, "count": 4, "total": 0.8})
+    assert "sum=0.8," in whole and "count=4 " in whole
+
+
+def test_event_hub_function_is_only_registered_with_a_hub_name(dynatrace, load_poller, monkeypatch):
+    import sys, importlib
+    monkeypatch.delenv("EH_NAME", raising=False)
+    poll = load_poller(dynatrace.url, None, tag="dynatrace-metrics")
+    module = sys.modules["function_app"]
+    assert not hasattr(module, "run") and callable(poll)                      # poller-only deployment
+
+    monkeypatch.setenv("EH_NAME", "metrics")
+    sys.modules.pop("function_app")
+    assert hasattr(importlib.import_module("function_app"), "run")

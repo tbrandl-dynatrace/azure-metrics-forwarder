@@ -85,6 +85,7 @@ def load_function(monkeypatch):
         monkeypatch.setenv("DT_ENVIRONMENT", dt_environment)
         monkeypatch.setenv("DT_TOKEN", dt_token)
         monkeypatch.setenv("AZURE_LOCATION", location)
+        monkeypatch.setenv("EH_NAME", "metrics")           # the Event Hub function is only registered with a hub name
         monkeypatch.delenv("REGION_NAME", raising=False)
         sys.modules.pop("function_app", None)
         module = importlib.import_module("function_app")

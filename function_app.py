@@ -102,33 +102,54 @@ def to_line(raw: dict):
     if r.get("kind") == "count":
         # Azure aggregates this metric as a Total per minute, i.e. a counter: send the minute's increase as a counter delta
         return f'{key} count,delta={float(r["total"])} {int(ts.timestamp() * 1000)}'
+    total = float(r["total"])
+    if count != int(count):
+        # Dynatrace needs an integer sample count; some metrics (e.g. SaturationShoebox) report fractional ones.
+        # Keep the mean: one sample whose value is the average.
+        avg = r.get("average")
+        total = float(avg) if avg not in (None, "") else total / count
+        count = 1
     return (f'{key} gauge,min={float(r["minimum"])},max={float(r["maximum"])},'
-            f'sum={float(r["total"])},count={count:g} {int(ts.timestamp() * 1000)}')
+            f'sum={total},count={int(count)} {int(ts.timestamp() * 1000)}')
 
 
 NEWLINE = chr(10)
 
 
+def describe_rejection(resp, batch):
+    """The ingest error with the rejected lines quoted (the API reports them by 1-based line number)."""
+    try:
+        invalid = resp.json()["error"]["invalidLines"]
+        return NEWLINE.join(f'{x.get("error")} -> {batch[x["line"] - 1]}' for x in invalid)
+    except Exception:
+        return resp.text[:1500]
+
+
 def post_lines(lines):
     for i in range(0, len(lines), 1000):                        # API limit: 1000 lines per request
         resp = requests.post(DT_URL, headers=HEADERS, data=NEWLINE.join(lines[i:i + 1000]), timeout=30)
-        resp.raise_for_status()                                 # let the trigger retry the batch
+        if not resp.ok:                                         # let the trigger retry the batch, but say why
+            raise requests.HTTPError(f"{resp.status_code} from Dynatrace ingest: {describe_rejection(resp, lines[i:i + 1000])}",
+                                     response=resp)
 
 
-@app.event_hub_message_trigger(arg_name="events", event_hub_name="%EH_NAME%",
-                               connection="EH_CONN", cardinality="many")
-# typing.List, not builtin list[...]: the Python worker rejects the latter (FunctionLoadError)
-def run(events: List[func.EventHubEvent]):
-    lines = []
-    for e in events:
-        for r in iter_records(json.loads(e.get_body())):
-            line = to_line(r)
-            if line:
-                lines.append(line)
-    post_lines(lines)
+# The Event Hub function is only registered when EH_NAME is set, so a poller-only deployment (the default) carries no
+# Event Hub trigger that would fail without a hub.
+if os.environ.get("EH_NAME"):
+    @app.event_hub_message_trigger(arg_name="events", event_hub_name="%EH_NAME%",
+                                   connection="EH_CONN", cardinality="many")
+    # typing.List, not builtin list[...]: the Python worker rejects the latter (FunctionLoadError)
+    def run(events: List[func.EventHubEvent]):
+        lines = []
+        for e in events:
+            for r in iter_records(json.loads(e.get_body())):
+                line = to_line(r)
+                if line:
+                    lines.append(line)
+        post_lines(lines)
 
 
-# Alternative to the Event Hub pipeline: poll the Azure Monitor metrics API every minute for the minute that is
+# The default pipeline: poll the Azure Monitor metrics API every minute for the minute that is
 # AZMON_DELAY_MINUTES (default 2) old and forward it. Does nothing unless AZMON_TAG or AZMON_CONFIG is set (see azmon.py).
 # Don't poll resources that are also exported through a DCR / diagnostic setting.
 @app.timer_trigger(schedule="0 * * * * *", arg_name="timer", run_on_startup=False, use_monitor=False)
