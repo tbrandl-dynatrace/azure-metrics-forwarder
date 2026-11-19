@@ -9,3 +9,4 @@ __pycache__/
 .e2e-poller-state.env
 .venv-e2e/
 latency-results*.csv
+*.deb
